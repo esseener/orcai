@@ -108,3 +108,16 @@ test('force bypasses a fresh cache', async () => {
   assert.equal((await load(true))[0].id, 'm2')
   assert.equal(calls, 2)
 })
+
+test('blank selector falls back to a non-blank id', () => {
+  const models = parseModelRows([
+    { selector: '   ', id: 'p/m' },
+    { selector: '', id: 'p/n' },
+    { selector: 'p/o', id: 'p/ignored' },
+  ])
+  assert.deepEqual(models.map((m) => m.id), ['p/m', 'p/n', 'p/o'])
+})
+
+test('whitespace-only identifiers are rejected', () => {
+  assert.throws(() => parseModelRows([{ selector: '  ', id: '\t' }]), /没有可用的 selector\/id/)
+})

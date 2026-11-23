@@ -5,6 +5,7 @@ const status = atom<{ data?: { models?: OmpModel[]; fusion: FusionState }; error
 const modelList = atom<OmpModel[]>([])
 type ModelLoadState = 'idle' | 'loading' | 'ready' | 'error'
 const modelState = atom<ModelLoadState>('idle')
+const modelLoaded = atom(false)
 const modelError = atom<string | null>(null)
 const session = atom<{ data?: SessionStatus; error?: string } | null>(null)
 const sessionList = atom<{ file: string; dir: string; ageMs: number; active: boolean; title: string | null; cwd: string | null }[]>([])
@@ -138,7 +139,7 @@ async function fetchModels(signal: AbortSignal, force = false) {
     const list = await plugin.request('models.list', { force }, { signal, timeoutMs: 28_000 })
     // An empty array is a successful listing, not a failure: mark it ready so
     // the retry loop stops and pickers stop asking.
-    if (!signal.aborted) { set(modelList, list as OmpModel[]); set(modelError, null); set(modelState, 'ready') }
+    if (!signal.aborted) { set(modelList, list as OmpModel[]); set(modelError, null); set(modelState, 'ready'); set(modelLoaded, true) }
   } catch (error) {
     if (!signal.aborted) { set(modelError, message(error)); set(modelState, 'error') }
   } finally { fetchingModels = false }
@@ -177,11 +178,12 @@ export function setup(ctx: PanelContext) {
       statusRetryDelay = Math.min(statusRetryDelay * 2, 60_000)
       void refresh(ctx.signal)
     }
-    // Retry only while no listing has succeeded (idle/loading/error). A
-    // successful empty catalog is 'ready' and must not loop.
+    // Retry only while no listing has succeeded (idle/loading/error). Force it:
+    // a failed forced refresh must not be "recovered" from the still-warm empty
+    // cache, which would clear the error without running the CLI.
     if (read(modelState) !== 'ready' && Date.now() >= modelsRetryAt) {
       modelsRetryAt = Date.now() + 15_000
-      void fetchModels(ctx.signal)
+      void fetchModels(ctx.signal, true)
     }
     const file = read(sessionFile)
     plugin.request('session.status', file ? { file } : {}, { signal: ctx.signal, timeoutMs: 10_000 })
@@ -353,7 +355,7 @@ function sessionCard(f?: FusionState, driver: DriverState | null = null) {
 	const entry = read(status)
 	const f = entry?.data?.fusion
 	const fetched = read(modelList)
-	const models = read(modelState) === 'ready' ? fetched : entry?.data?.models ?? []
+	const models = read(modelLoaded) ? fetched : entry?.data?.models ?? []
 	return (
 		<Box padding="md">
 			<Stack gap="md">

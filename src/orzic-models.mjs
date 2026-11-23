@@ -13,11 +13,13 @@ export const MODEL_CATALOG_TTL_MS = 60_000
 export function parseModelRows(rows) {
   if (!Array.isArray(rows)) throw new Error('OMP models ls 返回了无效的模型列表。')
   const models = rows.flatMap((row) => {
-    const id = typeof row?.selector === 'string' ? row.selector : row?.id
-    if (typeof id !== 'string' || !id) return []
+    const selector = typeof row?.selector === 'string' ? row.selector.trim() : ''
+    const fallbackId = typeof row?.id === 'string' ? row.id.trim() : ''
+    const id = selector || fallbackId
+    if (!id) return []
     return [{
       id,
-      name: typeof row.name === 'string' ? row.name : id,
+      name: typeof row.name === 'string' && row.name.trim() ? row.name : id,
       provider: row.provider,
       thinking: Array.isArray(row.thinking) ? row.thinking.filter((level) => typeof level === 'string') : [],
     }]
