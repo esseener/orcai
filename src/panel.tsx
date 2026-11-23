@@ -2,6 +2,7 @@ import { atom, Badge, Box, Button, Card, Checkbox, EmptyState, IconButton, Image
 import type { FusionState, OmpModel, SessionStage, SessionStatus } from './protocol'
 
 const status = atom<{ data?: { models?: OmpModel[]; fusion: FusionState }; error?: string } | null>(null)
+const modelList = atom<OmpModel[]>([])
 const session = atom<{ data?: SessionStatus; error?: string } | null>(null)
 const sessionList = atom<{ file: string; dir: string; ageMs: number; active: boolean; title: string | null; cwd: string | null }[]>([])
 const sessionFile = atom<string | null>(null)
@@ -122,6 +123,16 @@ async function refresh(signal: AbortSignal) {
   finally { refreshing = false }
 }
 
+// Model catalog is a separate, slower read (`omp models ls`, ~5.6s on a cold
+// CLI). fusion.status returns the last disk snapshot immediately; this fills
+// the pickers when the fresh listing lands.
+async function fetchModels(signal: AbortSignal) {
+  try {
+    const list = await plugin.request('models.list', {}, { signal, timeoutMs: 28_000 })
+    if (!signal.aborted) set(modelList, list as OmpModel[])
+  } catch { /* selectors keep their current-role fallbacks */ }
+}
+
 function patch(patch: { enabled?: boolean; from?: string; fromEffort?: string | null; into?: string; intoEffort?: string | null; taskPrewalk?: boolean; advisor?: boolean; advisorModel?: string; advisorEffort?: string | null; ocr?: boolean; ocrModel?: string; ocrEffort?: string | null; rulePath?: string; checkCmd?: string; autoReview?: boolean; autoRework?: boolean; maxRework?: number }) {
   const entry = read(status)
   if (!entry?.data || read(busy)) return
@@ -136,6 +147,7 @@ function patch(patch: { enabled?: boolean; from?: string; fromEffort?: string | 
 
 export function setup(ctx: PanelContext) {
   void refresh(ctx.signal)
+  void fetchModels(ctx.signal)
   // `fusion.status` can fail transiently (worker restart, IPC drop) or keep
   // returning an error. Retry while the panel has no usable payload OR carries
   // an error; back off 5s→60s so a hard failure does not hammer the OMP CLI,
@@ -224,7 +236,7 @@ function modelPicker(fid: Fid, title: string, caption: string, currentModel: str
                     {modelLabel(m, m.name)}
                   </Button>
                 ))}
-                {!filtered.length && <Text size="xs" muted>无匹配模型</Text>}
+                {!filtered.length && <Text size="xs" muted>{models.length ? '无匹配模型' : '模型目录加载中…'}</Text>}
               </Stack>
             </Box>
           </Stack>
@@ -315,7 +327,8 @@ function sessionCard(f?: FusionState, driver: DriverState | null = null) {
 	export default function Panel() {
 	const entry = read(status)
 	const f = entry?.data?.fusion
-	const models = entry?.data?.models ?? []
+	const fetched = read(modelList)
+	const models = fetched.length ? fetched : entry?.data?.models ?? []
 	return (
 		<Box padding="md">
 			<Stack gap="md">
@@ -331,7 +344,11 @@ function sessionCard(f?: FusionState, driver: DriverState | null = null) {
 						<Stack gap="md">
 							<Text size="xs" muted>开始任务后由规划模型只读规划；批准计划后恢复执行模型，验收仍在会话外。</Text>
 							{entry?.error && <Text size="sm" tone="warning">{entry.error}</Text>}
-							{!entry?.data && !entry?.error && <Text size="sm" muted>读取中…</Text>}
+							{!entry?.data && !entry?.error && (
+								<Card title="正在读取配置" description="plan 角色 + 默认模型">
+									<Text size="sm" muted>正在从 OMP 读取模型角色；模型目录会在后台单独加载。</Text>
+								</Card>
+							)}
 							{entry?.data && f && (
 								<Card title="规划/执行模型" description="plan 角色 + 默认模型">
 									<Stack gap="sm">

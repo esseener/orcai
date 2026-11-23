@@ -70,11 +70,12 @@ node --test src/orzic-driver.test.mjs src/orzic-verdict.test.mjs src/orzic-model
 
 | 文件 | 职责 |
 |---|---|
-| `src/worker.ts` | `fusion.status`/`fusion.set`/`session.status`/`session.list` + 接线 `acceptance.*` handler;`installLoopExtension` 把 loop+driver 同步进 `~/.omp/agent/extensions` |
+| `src/worker.ts` | `fusion.status`/`fusion.set`/`models.list`/`session.status`/`session.list` + 接线 `acceptance.*` handler;`fusion.status` 用一次 `omp config list` 并立即返回磁盘模型快照,`models.list` 单独刷新目录;`installLoopExtension` 把 loop+driver 同步进 `~/.omp/agent/extensions` |
 | `src/acceptance.ts` | `acceptance.review`(ompJudge/ocrCli 手动判定)+ `acceptance.result`(读 review.json+lock)+ `acceptance.stop`(写带 run-token 的 stop flag,force 附 kill) |
 | `src/cli.ts` | `ompExecutable`(OMP CLI 路径解析)+ `commandError` |
-| `src/panel.tsx` | 侧栏:fusion 配置 / 会话卡 / 验收开关+手动验收 / driver 状态条+停止+强杀 |
+| `src/panel.tsx` | 侧栏:fusion 配置 / 会话卡 / 验收开关+手动验收 / driver 状态条+停止+强杀;配置与模型目录分两路加载 |
 | `src/protocol.ts` | `PluginRequests` 声明 + `AcceptanceCfg`/`ReviewVerdict`/`Finding`/`ReviewOut`/`FusionState`/`SessionStatus` |
+| `src/orzic-models.mjs` | `omp models ls` 的缓存 + single-flight:并发/重试共享一次 CLI,失败拒绝而不是返回空目录 |
 | `src/orzic-loop.ts` | OMP 扩展:`before_agent_start` 恢复规划模型;`tool_call` 标 `wroteThisTurn`;`agent_end` 捕获 `ctx.sessionManager.getSessionFile()` → 写 `ORZIC_SESSION_FILE` env → spawn detached driver;`prompt_submit` 自审兜底(仅 `!consumed` rework) |
 | `src/orzic-driver.mjs` | Detached Node driver:锁 + session pin + gitDiff → judge(omp)→ verdict 写盘 → rework 则 `omp -r` 注入;每轮重读 `orzic-acceptance.json` |
 | `src/orzic-verdict.mjs` | `--mode json` ndjson → `message_end` assistant text → verdict(`pass`/`rework`/`failed`/`unreviewed`)严格解析,失败不 pass |

@@ -81,12 +81,32 @@ function ompCli<T>(...args: string[]): Promise<T> {
   })
 }
 
-async function ompConfigScalar(key: string): Promise<unknown> {
-  return (await ompCli<{ value?: unknown }>('config', 'get', key))?.value
+type ConfigRow = { value?: unknown }
+let configCache: { at: number; rows: Record<string, ConfigRow> } | null = null
+
+// One `omp config list` returns every key with its value (644 keys, 126 KiB,
+// ~1.3s) instead of six separate `config get` processes. Failures reject:
+// returning {} would render plausible defaults and hide a broken OMP install.
+async function configCatalog(): Promise<Record<string, ConfigRow>> {
+  if (configCache && Date.now() - configCache.at < 15_000) return configCache.rows
+  const rows = await ompCli<Record<string, ConfigRow>>('config', 'list')
+  configCache = { at: Date.now(), rows: rows ?? {} }
+  return configCache.rows
+}
+function configValue(rows: Record<string, ConfigRow>, key: string): unknown {
+  return rows[key]?.value
 }
 async function ompConfigSet(key: string, value: unknown): Promise<void> {
   await ompCli('config', 'set', key, typeof value === 'string' ? value : JSON.stringify(value))
 }
+
+const MODEL_CACHE_FILE = join(homedir(), '.omp', 'agent', 'orzic-models.json')
+let modelSnapshot: OmpModel[] = (() => {
+  try {
+    const d = JSON.parse(readFileSync(MODEL_CACHE_FILE, 'utf8')) as { models?: OmpModel[] }
+    return Array.isArray(d.models) ? d.models : []
+  } catch { return [] }
+})()
 
 const ompModelCatalog = createModelCatalog({
   run: async (): Promise<OmpModel[]> => {
@@ -101,6 +121,13 @@ const ompModelCatalog = createModelCatalog({
   }
 })
 
+async function refreshModelCatalog(): Promise<OmpModel[]> {
+  const models = await ompModelCatalog()
+  modelSnapshot = models
+  if (models.length) writeFileSafe(MODEL_CACHE_FILE, JSON.stringify({ at: Date.now(), models }))
+  return models
+}
+
 function split(v: unknown): { model: string | null; effort: string | null } {
   if (typeof v !== 'string' || !v) return { model: null, effort: null }
   const i = v.lastIndexOf(':')
@@ -111,22 +138,30 @@ function join2(model: string | null, effort: string | null): string | null {
 }
 
 async function status(orca: OrcaWorkerApi): Promise<{ models: OmpModel[]; fusion: FusionState }> {
-  const [models, planEnabled, legacyFrom, legacyInto, taskPrewalk, advisor, roles, acc] = await Promise.all([
-    ompModelCatalog(), ompConfigScalar('plan.enabled'), ompConfigScalar('prewalk.from'), ompConfigScalar('prewalk.into'), ompConfigScalar('task.prewalk'), ompConfigScalar('advisor.enabled'),
-    ompCli<{ value?: Record<string, unknown> }>('config', 'get', 'modelRoles'),
+  const [cfg, acc] = await Promise.all([
+    configCatalog(),
     orca.storage.get('acceptance') as Promise<AcceptanceCfg | null>
   ])
-  const rv = roles?.value ?? {}
+  const rv = (configValue(cfg, 'modelRoles') as Record<string, unknown> | undefined) ?? {}
+  const planEnabled = configValue(cfg, 'plan.enabled')
+  const legacyFrom = configValue(cfg, 'prewalk.from')
+  const legacyInto = configValue(cfg, 'prewalk.into')
+  const taskPrewalk = configValue(cfg, 'task.prewalk')
+  const advisor = configValue(cfg, 'advisor.enabled')
   const fromValue = typeof rv.plan === 'string' && rv.plan ? rv.plan : legacyFrom
   const intoValue = typeof rv.default === 'string' && rv.default ? rv.default : legacyInto
   const sf = split(fromValue), si = split(intoValue)
   const am = split(typeof rv.advisor === 'string' ? rv.advisor : null)
   const ac: AcceptanceCfg = { ocr: acc?.ocr === true, ocrModel: acc?.ocrModel ?? 'gpt-6.2-sol', ocrEffort: acc?.ocrEffort ?? 'high', rulePath: acc?.rulePath ?? '.opencodereview/rule.json', checkCmd: acc?.checkCmd ?? null, autoReview: acc?.autoReview === true, autoRework: acc?.autoRework === true, maxRework: typeof acc?.maxRework === 'number' && acc.maxRework > 0 ? acc.maxRework : 3, autoRoute: acc?.autoRoute === true, planner: typeof acc?.planner === 'string' ? acc.planner : null, executor: typeof acc?.executor === 'string' ? acc.executor : null }
-  return { models, fusion: { enabled: planEnabled === true, from: sf.model, fromEffort: sf.effort, into: si.model, intoEffort: si.effort, taskPrewalk: taskPrewalk === true, advisor: advisor === true, advisorModel: am.model, advisorEffort: am.effort, ocr: ac.ocr, ocrModel: ac.ocrModel, ocrEffort: ac.ocrEffort, rulePath: ac.rulePath, checkCmd: ac.checkCmd, autoReview: ac.autoReview, autoRework: ac.autoRework, maxRework: ac.maxRework } }
+  return { models: modelSnapshot, fusion: { enabled: planEnabled === true, from: sf.model, fromEffort: sf.effort, into: si.model, intoEffort: si.effort, taskPrewalk: taskPrewalk === true, advisor: advisor === true, advisorModel: am.model, advisorEffort: am.effort, ocr: ac.ocr, ocrModel: ac.ocrModel, ocrEffort: ac.ocrEffort, rulePath: ac.rulePath, checkCmd: ac.checkCmd, autoReview: ac.autoReview, autoRework: ac.autoRework, maxRework: ac.maxRework } }
 }
 
 export default function activate(orca: OrcaWorkerApi): void {
   installLoopExtension()
+  // Warm the catalog off the critical path: fusion.status serves the last
+  // snapshot immediately, while models.list waits for a fresh listing.
+  void refreshModelCatalog().catch(() => undefined)
+  orca.panels.handle('models.list', async () => JSON.parse(JSON.stringify(await refreshModelCatalog())))
   // Propagate failures: a synthetic default fusion with `_err` used to be
   // written into the panel as real data, which stopped the retry loop and
   // pinned wrong settings. The panel now retries a rejected status request.
@@ -168,6 +203,7 @@ export default function activate(orca: OrcaWorkerApi): void {
       next.from || next.into || next.advisorModel ? ompConfigSet('modelRoles', roles) : Promise.resolve(),
       orca.storage.set('acceptance', acceptance), writeFileSafe(join(homedir(), '.omp', 'agent', 'orzic-acceptance.json'), JSON.stringify({ ...acceptance }))
     ])
+    configCache = null
     const sf = split(next.from), si = split(next.into), sa = split(next.advisorModel)
     return { enabled: next.enabled, from: sf.model, fromEffort: sf.effort, into: si.model, intoEffort: si.effort, taskPrewalk: next.taskPrewalk, advisor: next.advisor, advisorModel: sa.model, advisorEffort: sa.effort, ocr: next.ocr, ocrModel: next.ocrModel, ocrEffort: next.ocrEffort, rulePath: next.rulePath, checkCmd: next.checkCmd, autoReview: next.autoReview, autoRework: next.autoRework, maxRework: next.maxRework }
   })
