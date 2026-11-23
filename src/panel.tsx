@@ -3,6 +3,8 @@ import type { FusionState, OmpModel, SessionStage, SessionStatus } from './proto
 
 const status = atom<{ data?: { models?: OmpModel[]; fusion: FusionState }; error?: string } | null>(null)
 const modelList = atom<OmpModel[]>([])
+type ModelLoadState = 'idle' | 'loading' | 'ready' | 'error'
+const modelState = atom<ModelLoadState>('idle')
 const modelError = atom<string | null>(null)
 const session = atom<{ data?: SessionStatus; error?: string } | null>(null)
 const sessionList = atom<{ file: string; dir: string; ageMs: number; active: boolean; title: string | null; cwd: string | null }[]>([])
@@ -131,11 +133,14 @@ let fetchingModels = false
 async function fetchModels(signal: AbortSignal) {
   if (fetchingModels) return
   fetchingModels = true
+  set(modelState, 'loading')
   try {
     const list = await plugin.request('models.list', {}, { signal, timeoutMs: 28_000 })
-    if (!signal.aborted) { set(modelList, list as OmpModel[]); set(modelError, null) }
+    // An empty array is a successful listing, not a failure: mark it ready so
+    // the retry loop stops and pickers stop asking.
+    if (!signal.aborted) { set(modelList, list as OmpModel[]); set(modelError, null); set(modelState, 'ready') }
   } catch (error) {
-    if (!signal.aborted) set(modelError, message(error))
+    if (!signal.aborted) { set(modelError, message(error)); set(modelState, 'error') }
   } finally { fetchingModels = false }
 }
 
@@ -172,10 +177,9 @@ export function setup(ctx: PanelContext) {
       statusRetryDelay = Math.min(statusRetryDelay * 2, 60_000)
       void refresh(ctx.signal)
     }
-    // An empty list means the catalog never landed. Retry until it does so a
-    // transient `models.list` failure (worker restart, CLI hiccup) cannot leave
-    // the pickers on "加载中" for the life of the panel.
-    if (!read(modelList).length && Date.now() >= modelsRetryAt) {
+    // Retry only while no listing has succeeded (idle/loading/error). A
+    // successful empty catalog is 'ready' and must not loop.
+    if (read(modelState) !== 'ready' && Date.now() >= modelsRetryAt) {
       modelsRetryAt = Date.now() + 15_000
       void fetchModels(ctx.signal)
     }
@@ -217,6 +221,13 @@ function modelLabel(model: OmpModel | undefined, fallback: string): string {
   return supplier ? `${supplier} · ${model.name}` : model.name
 }
 
+function modelEmptyLabel(): string {
+  const state = read(modelState)
+  if (state === 'ready') return '目录中没有可用模型'
+  if (state === 'error') return '模型目录不可用'
+  return '模型目录加载中…'
+}
+
 function modelPicker(fid: Fid, title: string, caption: string, currentModel: string | null, currentEffort: string | null, models: OmpModel[]) {
   const entry = read(status)
   const d = read(draft)[fid] ?? {}
@@ -250,7 +261,7 @@ function modelPicker(fid: Fid, title: string, caption: string, currentModel: str
                     {modelLabel(m, m.name)}
                   </Button>
                 ))}
-                {!filtered.length && <Text size="xs" muted>{models.length ? '无匹配模型' : '模型目录加载中…'}</Text>}
+                {!filtered.length && <Text size="xs" muted>{models.length ? '无匹配模型' : modelEmptyLabel()}</Text>}
               </Stack>
             </Box>
           </Stack>
@@ -342,7 +353,7 @@ function sessionCard(f?: FusionState, driver: DriverState | null = null) {
 	const entry = read(status)
 	const f = entry?.data?.fusion
 	const fetched = read(modelList)
-	const models = fetched.length ? fetched : entry?.data?.models ?? []
+	const models = read(modelState) === 'ready' ? fetched : entry?.data?.models ?? []
 	return (
 		<Box padding="md">
 			<Stack gap="md">

@@ -124,7 +124,9 @@ const ompModelCatalog = createModelCatalog({
 async function refreshModelCatalog(): Promise<OmpModel[]> {
   const models = await ompModelCatalog()
   modelSnapshot = models
-  if (models.length) writeFileSafe(MODEL_CACHE_FILE, JSON.stringify({ at: Date.now(), models }))
+  // Persist successful empty listings too: a stale non-empty snapshot must not
+  // outlive a catalog that now reports no models.
+  writeFileSafe(MODEL_CACHE_FILE, JSON.stringify({ at: Date.now(), models }))
   return models
 }
 
