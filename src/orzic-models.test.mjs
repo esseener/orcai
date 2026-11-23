@@ -4,7 +4,7 @@
 // concurrent panel retries must share one run.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createModelCatalog } from './orzic-models.mjs'
+import { createModelCatalog, parseModelRows } from './orzic-models.mjs'
 
 test('concurrent loads share one run and reuse its cache', async () => {
   let calls = 0
@@ -74,4 +74,37 @@ test('a failed refresh never becomes an empty success', async () => {
 test('non-array output is an error, not an empty catalog', async () => {
   const load = createModelCatalog({ run: async () => undefined })
   await assert.rejects(load(), /无效的模型列表/)
+})
+
+test('an empty array is a valid empty catalog', () => {
+  assert.deepEqual(parseModelRows([]), [])
+})
+
+test('rows with selector or id are mapped', () => {
+  const models = parseModelRows([
+    { selector: 'p/m:high', name: 'M', provider: 'p', thinking: ['low', 7, 'high'] },
+    { id: 'p/n' },
+  ])
+  assert.deepEqual(models, [
+    { id: 'p/m:high', name: 'M', provider: 'p', thinking: ['low', 'high'] },
+    { id: 'p/n', name: 'p/n', provider: undefined, thinking: [] },
+  ])
+})
+
+test('non-empty rows with no usable id are an error, not an empty catalog', () => {
+  assert.throws(() => parseModelRows([{ name: 'no id' }, { selector: '' }]), /没有可用的 selector\/id/)
+})
+
+test('non-array output is an error at the parser too', () => {
+  assert.throws(() => parseModelRows(undefined), /无效的模型列表/)
+})
+
+test('force bypasses a fresh cache', async () => {
+  let calls = 0
+  const load = createModelCatalog({ run: async () => { calls++; return [{ id: `m${calls}` }] } })
+  assert.equal((await load())[0].id, 'm1')
+  assert.equal((await load())[0].id, 'm1')
+  assert.equal(calls, 1)
+  assert.equal((await load(true))[0].id, 'm2')
+  assert.equal(calls, 2)
 })

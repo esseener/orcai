@@ -130,12 +130,12 @@ async function refresh(signal: AbortSignal) {
 // CLI). fusion.status returns the last disk snapshot immediately; this fills
 // the pickers when the fresh listing lands.
 let fetchingModels = false
-async function fetchModels(signal: AbortSignal) {
+async function fetchModels(signal: AbortSignal, force = false) {
   if (fetchingModels) return
   fetchingModels = true
   set(modelState, 'loading')
   try {
-    const list = await plugin.request('models.list', {}, { signal, timeoutMs: 28_000 })
+    const list = await plugin.request('models.list', { force }, { signal, timeoutMs: 28_000 })
     // An empty array is a successful listing, not a failure: mark it ready so
     // the retry loop stops and pickers stop asking.
     if (!signal.aborted) { set(modelList, list as OmpModel[]); set(modelError, null); set(modelState, 'ready') }
@@ -374,7 +374,13 @@ function sessionCard(f?: FusionState, driver: DriverState | null = null) {
 									<Text size="sm" tone="warning">
 										{models.length ? `模型目录刷新失败，使用缓存：${read(modelError)}` : `模型目录加载失败：${read(modelError)}`}
 									</Text>
-									<Button size="sm" variant="ghost" onPress={() => void fetchModels(signal)}>重试</Button>
+									<Button size="sm" variant="ghost" onPress={() => void fetchModels(signal, true)}>重试</Button>
+								</Row>
+							)}
+							{read(modelState) === 'ready' && !models.length && (
+								<Row justify="between" align="center" gap="sm">
+									<Text size="sm" muted>模型目录为空；新增模型后可刷新。</Text>
+									<Button size="sm" variant="ghost" onPress={() => void fetchModels(signal, true)}>刷新</Button>
 								</Row>
 							)}
 							{!entry?.data && !entry?.error && (

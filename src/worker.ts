@@ -7,7 +7,7 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import type { AcceptanceCfg, FusionState, ModelSwitch, OmpModel, SessionStatus } from './protocol'
 import { commandError, ompExecutable } from './cli'
 import { acceptanceResult, acceptanceReview, acceptanceStop } from './acceptance'
-import { createModelCatalog, MODELS_TIMEOUT_MS } from './orzic-models.mjs'
+import { createModelCatalog, MODELS_TIMEOUT_MS, parseModelRows } from './orzic-models.mjs'
 
 // Ship the in-session acceptance loop and detached review driver to OMP's
 // extension directory. Model routing remains owned by OMP's native prewalk.
@@ -110,19 +110,13 @@ let modelSnapshot: OmpModel[] = (() => {
 
 const ompModelCatalog = createModelCatalog({
   run: async (): Promise<OmpModel[]> => {
-    const receipt = await ompCli<{ models?: { provider?: string; id?: string; selector?: string; name?: string; thinking?: unknown }[] }>('models', 'ls')
-    const rows = receipt?.models
-    if (!Array.isArray(rows)) throw new Error('OMP models ls 返回了无效的模型列表。')
-    return rows.flatMap((row) => {
-      const id = typeof row.selector === 'string' ? row.selector : row.id
-      if (typeof id !== 'string') return []
-      return [{ id, name: row.name ?? id, provider: row.provider, thinking: Array.isArray(row.thinking) ? row.thinking.filter((l): l is string => typeof l === 'string') : [] }]
-    })
+    const receipt = await ompCli<{ models?: unknown }>('models', 'ls')
+    return parseModelRows(receipt?.models)
   }
 })
 
-async function refreshModelCatalog(): Promise<OmpModel[]> {
-  const models = await ompModelCatalog()
+async function refreshModelCatalog(force = false): Promise<OmpModel[]> {
+  const models = await ompModelCatalog(force)
   modelSnapshot = models
   // Persist successful empty listings too: a stale non-empty snapshot must not
   // outlive a catalog that now reports no models.
@@ -163,7 +157,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   // Warm the catalog off the critical path: fusion.status serves the last
   // snapshot immediately, while models.list waits for a fresh listing.
   void refreshModelCatalog().catch(() => undefined)
-  orca.panels.handle('models.list', async () => JSON.parse(JSON.stringify(await refreshModelCatalog())))
+  orca.panels.handle('models.list', async (input) => JSON.parse(JSON.stringify(await refreshModelCatalog(input?.force === true))))
   // Propagate failures: a synthetic default fusion with `_err` used to be
   // written into the panel as real data, which stopped the retry loop and
   // pinned wrong settings. The panel now retries a rejected status request.
