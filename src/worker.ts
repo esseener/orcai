@@ -7,6 +7,7 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import type { AcceptanceCfg, FusionState, ModelSwitch, OmpModel, SessionStatus } from './protocol'
 import { commandError, ompExecutable } from './cli'
 import { acceptanceResult, acceptanceReview, acceptanceStop } from './acceptance'
+import { createModelCatalog, MODELS_TIMEOUT_MS } from './orzic-models.mjs'
 
 // Ship the in-session acceptance loop and detached review driver to OMP's
 // extension directory. Model routing remains owned by OMP's native prewalk.
@@ -67,9 +68,6 @@ function installLoopExtension(): void {
   } catch { /* extension install is best-effort */ }
 }
 
-const MODELS_TIMEOUT_MS = 20_000
-const MODEL_CATALOG_TTL_MS = 60_000
-
 function ompCli<T>(...args: string[]): Promise<T> {
   const env = { ...process.env }
   if (process.platform === 'win32' && !env.APPDATA) env.APPDATA = join(homedir(), 'AppData', 'Roaming')
@@ -90,31 +88,18 @@ async function ompConfigSet(key: string, value: unknown): Promise<void> {
   await ompCli('config', 'set', key, typeof value === 'string' ? value : JSON.stringify(value))
 }
 
-let modelCatalog: { at: number; models: OmpModel[] } | null = null
-let modelCatalogPending: Promise<OmpModel[]> | null = null
-
-function ompModelCatalog(): Promise<OmpModel[]> {
-  if (modelCatalog && Date.now() - modelCatalog.at < MODEL_CATALOG_TTL_MS) return Promise.resolve(modelCatalog.models)
-  // One `omp models ls` per worker at a time. Panel requests time out after 28s,
-  // but execFile keeps running; without this gate every retry would fork another
-  // 20s CLI and they would pile up behind each other.
-  if (modelCatalogPending) return modelCatalogPending
-  modelCatalogPending = (async (): Promise<OmpModel[]> => {
-    try {
-      const receipt = await ompCli<{ models?: { provider?: string; id?: string; selector?: string; name?: string; thinking?: unknown }[] }>('models', 'ls')
-      const rows = receipt?.models
-      if (!Array.isArray(rows)) return []
-      const models = rows.flatMap((row) => {
-        const id = typeof row.selector === 'string' ? row.selector : row.id
-        if (typeof id !== 'string') return []
-        return [{ id, name: row.name ?? id, provider: row.provider, thinking: Array.isArray(row.thinking) ? row.thinking.filter((l): l is string => typeof l === 'string') : [] }]
-      })
-      modelCatalog = { at: Date.now(), models }
-      return models
-    } catch { return [] } finally { modelCatalogPending = null }
-  })()
-  return modelCatalogPending
-}
+const ompModelCatalog = createModelCatalog({
+  run: async (): Promise<OmpModel[]> => {
+    const receipt = await ompCli<{ models?: { provider?: string; id?: string; selector?: string; name?: string; thinking?: unknown }[] }>('models', 'ls')
+    const rows = receipt?.models
+    if (!Array.isArray(rows)) throw new Error('OMP models ls 返回了无效的模型列表。')
+    return rows.flatMap((row) => {
+      const id = typeof row.selector === 'string' ? row.selector : row.id
+      if (typeof id !== 'string') return []
+      return [{ id, name: row.name ?? id, provider: row.provider, thinking: Array.isArray(row.thinking) ? row.thinking.filter((l): l is string => typeof l === 'string') : [] }]
+    })
+  }
+})
 
 function split(v: unknown): { model: string | null; effort: string | null } {
   if (typeof v !== 'string' || !v) return { model: null, effort: null }

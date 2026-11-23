@@ -63,7 +63,7 @@ orca plugin open local.orzic --panel orzic --json
 
 ```powershell
 npm run typecheck
-node --test src/orzic-driver.test.mjs src/orzic-verdict.test.mjs
+node --test src/orzic-driver.test.mjs src/orzic-verdict.test.mjs src/orzic-models.test.mjs
 ```
 
 ## 结构
@@ -78,6 +78,7 @@ node --test src/orzic-driver.test.mjs src/orzic-verdict.test.mjs
 | `src/orzic-loop.ts` | OMP 扩展:`before_agent_start` 恢复规划模型;`tool_call` 标 `wroteThisTurn`;`agent_end` 捕获 `ctx.sessionManager.getSessionFile()` → 写 `ORZIC_SESSION_FILE` env → spawn detached driver;`prompt_submit` 自审兜底(仅 `!consumed` rework) |
 | `src/orzic-driver.mjs` | Detached Node driver:锁 + session pin + gitDiff → judge(omp)→ verdict 写盘 → rework 则 `omp -r` 注入;每轮重读 `orzic-acceptance.json` |
 | `src/orzic-verdict.mjs` | `--mode json` ndjson → `message_end` assistant text → verdict(`pass`/`rework`/`failed`/`unreviewed`)严格解析,失败不 pass |
+| `src/orzic-models.mjs` | 模型目录 60s 缓存 + 单飞;`omp models ls` 失败/超时向上抛错,不降级成空列表 |
 | `src/orzic-lock.mjs` | `wx` 原子锁 + heartbeat + stale(10min)回收 |
 | `src/orzic-session.mjs` | Session pin 解析:权威 `ORZIC_SESSION_FILE` 路径存在且 cwd 匹配 → `exact`,否则 `scan`(只评审) |
 | `src/orzic-stub-omp.mjs` | 测试 stub:录 `orzic-stub-calls.jsonl`,按 `ORZIC_STUB_MODE` 返回 verdict;`ORZIC_STUB_STOP_ON_INJECT` 在 `-r` 里写 stop flag 测 mid-run 截停 |
