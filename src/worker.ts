@@ -67,12 +67,15 @@ function installLoopExtension(): void {
   } catch { /* extension install is best-effort */ }
 }
 
+const MODELS_TIMEOUT_MS = 20_000
+const MODEL_CATALOG_TTL_MS = 60_000
+
 function ompCli<T>(...args: string[]): Promise<T> {
   const env = { ...process.env }
   if (process.platform === 'win32' && !env.APPDATA) env.APPDATA = join(homedir(), 'AppData', 'Roaming')
   return new Promise((resolve, reject) => {
     execFile(ompExecutable, [...args, '--json'], {
-      encoding: 'utf8', env, windowsHide: true, timeout: args[0] === 'models' ? 90_000 : 15_000, maxBuffer: 16 * 1024 * 1024
+      encoding: 'utf8', env, windowsHide: true, timeout: args[0] === 'models' ? MODELS_TIMEOUT_MS : 15_000, maxBuffer: 16 * 1024 * 1024
     }, (error, stdout) => {
       if (error) return reject(commandError(`无法运行 OMP ${args.slice(0, 2).join(' ')}。CLI:${ompExecutable}`))
       try { resolve(JSON.parse(stdout) as T) } catch { reject(commandError(`OMP ${args.slice(0, 2).join(' ')} 返回了无法解析的输出。`)) }
@@ -87,17 +90,30 @@ async function ompConfigSet(key: string, value: unknown): Promise<void> {
   await ompCli('config', 'set', key, typeof value === 'string' ? value : JSON.stringify(value))
 }
 
-async function ompModelCatalog(): Promise<OmpModel[]> {
-  try {
-    const receipt = await ompCli<{ models?: { provider?: string; id?: string; selector?: string; name?: string; thinking?: unknown }[] }>('models', 'ls')
-    const rows = receipt?.models
-    if (!Array.isArray(rows)) return []
-    return rows.flatMap((row) => {
-      const id = typeof row.selector === 'string' ? row.selector : row.id
-      if (typeof id !== 'string') return []
-      return [{ id, name: row.name ?? id, provider: row.provider, thinking: Array.isArray(row.thinking) ? row.thinking.filter((l): l is string => typeof l === 'string') : [] }]
-    })
-  } catch { return [] }
+let modelCatalog: { at: number; models: OmpModel[] } | null = null
+let modelCatalogPending: Promise<OmpModel[]> | null = null
+
+function ompModelCatalog(): Promise<OmpModel[]> {
+  if (modelCatalog && Date.now() - modelCatalog.at < MODEL_CATALOG_TTL_MS) return Promise.resolve(modelCatalog.models)
+  // One `omp models ls` per worker at a time. Panel requests time out after 28s,
+  // but execFile keeps running; without this gate every retry would fork another
+  // 20s CLI and they would pile up behind each other.
+  if (modelCatalogPending) return modelCatalogPending
+  modelCatalogPending = (async (): Promise<OmpModel[]> => {
+    try {
+      const receipt = await ompCli<{ models?: { provider?: string; id?: string; selector?: string; name?: string; thinking?: unknown }[] }>('models', 'ls')
+      const rows = receipt?.models
+      if (!Array.isArray(rows)) return []
+      const models = rows.flatMap((row) => {
+        const id = typeof row.selector === 'string' ? row.selector : row.id
+        if (typeof id !== 'string') return []
+        return [{ id, name: row.name ?? id, provider: row.provider, thinking: Array.isArray(row.thinking) ? row.thinking.filter((l): l is string => typeof l === 'string') : [] }]
+      })
+      modelCatalog = { at: Date.now(), models }
+      return models
+    } catch { return [] } finally { modelCatalogPending = null }
+  })()
+  return modelCatalogPending
 }
 
 function split(v: unknown): { model: string | null; effort: string | null } {
@@ -126,7 +142,10 @@ async function status(orca: OrcaWorkerApi): Promise<{ models: OmpModel[]; fusion
 
 export default function activate(orca: OrcaWorkerApi): void {
   installLoopExtension()
-  orca.panels.handle('fusion.status', async () => { try { const r = await status(orca); return JSON.parse(JSON.stringify(r)) } catch (e) { return { models: [], fusion: { enabled: false, from: null, fromEffort: null, into: null, intoEffort: null, taskPrewalk: false, advisor: false, advisorModel: null, advisorEffort: null, ocr: false, ocrModel: null, ocrEffort: null, rulePath: null, autoReview: false, autoRework: false, maxRework: 3, _err: String(e) } } } })
+  // Propagate failures: a synthetic default fusion with `_err` used to be
+  // written into the panel as real data, which stopped the retry loop and
+  // pinned wrong settings. The panel now retries a rejected status request.
+  orca.panels.handle('fusion.status', async () => JSON.parse(JSON.stringify(await status(orca))))
   orca.panels.handle('session.status', async (input) => sessionStatus(input as { file?: string }))
   orca.panels.handle('session.list', async () => listSessions())
   orca.panels.handle('acceptance.review', async (input) => acceptanceReview(orca, input as { repo?: string; commit?: string; from?: string; to?: string }))

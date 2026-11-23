@@ -112,7 +112,11 @@ async function refresh(signal: AbortSignal) {
   if (refreshing) return
   refreshing = true
   try {
-    const result = await plugin.request('fusion.status', {}, { signal, timeoutMs: 30_000 })
+    const result = await plugin.request('fusion.status', {}, { signal, timeoutMs: 28_000 }) as { models?: OmpModel[]; fusion?: FusionState & { _err?: string } }
+    // Older workers answered errors with a default fusion + _err instead of
+    // rejecting. Treat that as a failed refresh so retries continue instead of
+    // pinning the synthetic defaults as real state.
+    if (result?.fusion?._err) throw new Error(String(result.fusion._err))
     if (!signal.aborted) set(status, { data: result as { models?: OmpModel[]; fusion: FusionState } })
   } catch (error) { if (!signal.aborted) showError(error) }
   finally { refreshing = false }
@@ -132,15 +136,21 @@ function patch(patch: { enabled?: boolean; from?: string; fromEffort?: string | 
 
 export function setup(ctx: PanelContext) {
   void refresh(ctx.signal)
-  // A worker that was idle-reaped, restarted, or lost its IPC pipe rejects the
-  // first fusion.status with "worker disconnected before responding". That error
-  // must not stick for the life of the panel: retry with backoff until a status
-  // payload lands, then stop (later edits surface their own errors).
-  let statusRetryAt = Date.now() + 5_000
+  // `fusion.status` can fail transiently (worker restart, IPC drop) or keep
+  // returning an error. Retry while the panel has no usable payload OR carries
+  // an error; back off 5s→60s so a hard failure does not hammer the OMP CLI,
+  // and reset the backoff once a clean payload lands.
+  let statusRetryDelay = 5_000
+  let statusRetryAt = Date.now() + statusRetryDelay
   const tick = () => {
     if (ctx.signal.aborted) return
-    if (!read(status)?.data && Date.now() >= statusRetryAt) {
-      statusRetryAt = Date.now() + 5_000
+    const entry = read(status)
+    if (entry?.data && !entry.error) {
+      statusRetryDelay = 5_000
+      statusRetryAt = 0
+    } else if (Date.now() >= statusRetryAt) {
+      statusRetryAt = Date.now() + statusRetryDelay
+      statusRetryDelay = Math.min(statusRetryDelay * 2, 60_000)
       void refresh(ctx.signal)
     }
     const file = read(sessionFile)
