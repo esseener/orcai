@@ -84,7 +84,7 @@ function ompCli<T>(...args: string[]): Promise<T> {
 }
 
 async function ompConfigScalar(key: string): Promise<unknown> {
-  try { return (await ompCli<{ value?: unknown }>('config', 'get', key))?.value } catch { return undefined }
+  return (await ompCli<{ value?: unknown }>('config', 'get', key))?.value
 }
 async function ompConfigSet(key: string, value: unknown): Promise<void> {
   await ompCli('config', 'set', key, typeof value === 'string' ? value : JSON.stringify(value))
@@ -128,8 +128,8 @@ function join2(model: string | null, effort: string | null): string | null {
 async function status(orca: OrcaWorkerApi): Promise<{ models: OmpModel[]; fusion: FusionState }> {
   const [models, planEnabled, legacyFrom, legacyInto, taskPrewalk, advisor, roles, acc] = await Promise.all([
     ompModelCatalog(), ompConfigScalar('plan.enabled'), ompConfigScalar('prewalk.from'), ompConfigScalar('prewalk.into'), ompConfigScalar('task.prewalk'), ompConfigScalar('advisor.enabled'),
-    ompCli<{ value?: Record<string, unknown> }>('config', 'get', 'modelRoles').catch(() => null),
-    orca.storage.get('acceptance').catch(() => null) as Promise<AcceptanceCfg | null>
+    ompCli<{ value?: Record<string, unknown> }>('config', 'get', 'modelRoles'),
+    orca.storage.get('acceptance') as Promise<AcceptanceCfg | null>
   ])
   const rv = roles?.value ?? {}
   const fromValue = typeof rv.plan === 'string' && rv.plan ? rv.plan : legacyFrom
@@ -170,8 +170,7 @@ export default function activate(orca: OrcaWorkerApi): void {
       maxRework: typeof maxRework === 'number' && maxRework > 0 ? maxRework : current.maxRework
     }
     // 规划模型=新对话默认+restart;验收模型=modelRoles.advisor(独立第三模型)
-    let roles: Record<string, unknown> = {}
-    try { roles = (await ompCli<{ value?: Record<string, unknown> }>('config', 'get', 'modelRoles'))?.value ?? {} } catch { roles = {} }
+    const roles: Record<string, unknown> = (await ompCli<{ value?: Record<string, unknown> }>('config', 'get', 'modelRoles'))?.value ?? {}
     if (next.into) roles.default = next.into
     if (next.from) roles.plan = next.from
     if (next.advisorModel) roles.advisor = next.advisorModel
