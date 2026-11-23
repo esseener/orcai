@@ -3,6 +3,7 @@ import type { FusionState, OmpModel, SessionStage, SessionStatus } from './proto
 
 const status = atom<{ data?: { models?: OmpModel[]; fusion: FusionState }; error?: string } | null>(null)
 const modelList = atom<OmpModel[]>([])
+const modelError = atom<string | null>(null)
 const session = atom<{ data?: SessionStatus; error?: string } | null>(null)
 const sessionList = atom<{ file: string; dir: string; ageMs: number; active: boolean; title: string | null; cwd: string | null }[]>([])
 const sessionFile = atom<string | null>(null)
@@ -126,11 +127,16 @@ async function refresh(signal: AbortSignal) {
 // Model catalog is a separate, slower read (`omp models ls`, ~5.6s on a cold
 // CLI). fusion.status returns the last disk snapshot immediately; this fills
 // the pickers when the fresh listing lands.
+let fetchingModels = false
 async function fetchModels(signal: AbortSignal) {
+  if (fetchingModels) return
+  fetchingModels = true
   try {
     const list = await plugin.request('models.list', {}, { signal, timeoutMs: 28_000 })
-    if (!signal.aborted) set(modelList, list as OmpModel[])
-  } catch { /* selectors keep their current-role fallbacks */ }
+    if (!signal.aborted) { set(modelList, list as OmpModel[]); set(modelError, null) }
+  } catch (error) {
+    if (!signal.aborted) set(modelError, message(error))
+  } finally { fetchingModels = false }
 }
 
 function patch(patch: { enabled?: boolean; from?: string; fromEffort?: string | null; into?: string; intoEffort?: string | null; taskPrewalk?: boolean; advisor?: boolean; advisorModel?: string; advisorEffort?: string | null; ocr?: boolean; ocrModel?: string; ocrEffort?: string | null; rulePath?: string; checkCmd?: string; autoReview?: boolean; autoRework?: boolean; maxRework?: number }) {
@@ -154,6 +160,7 @@ export function setup(ctx: PanelContext) {
   // and reset the backoff once a clean payload lands.
   let statusRetryDelay = 5_000
   let statusRetryAt = Date.now() + statusRetryDelay
+  let modelsRetryAt = Date.now() + 15_000
   const tick = () => {
     if (ctx.signal.aborted) return
     const entry = read(status)
@@ -164,6 +171,13 @@ export function setup(ctx: PanelContext) {
       statusRetryAt = Date.now() + statusRetryDelay
       statusRetryDelay = Math.min(statusRetryDelay * 2, 60_000)
       void refresh(ctx.signal)
+    }
+    // An empty list means the catalog never landed. Retry until it does so a
+    // transient `models.list` failure (worker restart, CLI hiccup) cannot leave
+    // the pickers on "加载中" for the life of the panel.
+    if (!read(modelList).length && Date.now() >= modelsRetryAt) {
+      modelsRetryAt = Date.now() + 15_000
+      void fetchModels(ctx.signal)
     }
     const file = read(sessionFile)
     plugin.request('session.status', file ? { file } : {}, { signal: ctx.signal, timeoutMs: 10_000 })
@@ -344,6 +358,14 @@ function sessionCard(f?: FusionState, driver: DriverState | null = null) {
 						<Stack gap="md">
 							<Text size="xs" muted>开始任务后由规划模型只读规划；批准计划后恢复执行模型，验收仍在会话外。</Text>
 							{entry?.error && <Text size="sm" tone="warning">{entry.error}</Text>}
+							{read(modelError) && (
+								<Row justify="between" align="center" gap="sm">
+									<Text size="sm" tone="warning">
+										{models.length ? `模型目录刷新失败，使用缓存：${read(modelError)}` : `模型目录加载失败：${read(modelError)}`}
+									</Text>
+									<Button size="sm" variant="ghost" onPress={() => void fetchModels(signal)}>重试</Button>
+								</Row>
+							)}
 							{!entry?.data && !entry?.error && (
 								<Card title="正在读取配置" description="plan 角色 + 默认模型">
 									<Text size="sm" muted>正在从 OMP 读取模型角色；模型目录会在后台单独加载。</Text>
