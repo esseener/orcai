@@ -102,13 +102,20 @@ function visibleStage(s: SessionStatus | undefined, f: FusionState | undefined, 
   if (f?.from && s.currentModel === f.from) return { stage: 'planning', model: s.currentModel }
   return { stage: s.stage, model: s.stageModel }
 }
-function showError(error: unknown) { set(status, { error: error instanceof Error ? error.message : String(error) }) }
+function showError(error: unknown) {
+  const prev = read(status)
+  set(status, prev?.data ? { data: prev.data, error: message(error) } : { error: message(error) })
+}
 
+let refreshing = false
 async function refresh(signal: AbortSignal) {
+  if (refreshing) return
+  refreshing = true
   try {
     const result = await plugin.request('fusion.status', {}, { signal, timeoutMs: 30_000 })
     if (!signal.aborted) set(status, { data: result as { models?: OmpModel[]; fusion: FusionState } })
   } catch (error) { if (!signal.aborted) showError(error) }
+  finally { refreshing = false }
 }
 
 function patch(patch: { enabled?: boolean; from?: string; fromEffort?: string | null; into?: string; intoEffort?: string | null; taskPrewalk?: boolean; advisor?: boolean; advisorModel?: string; advisorEffort?: string | null; ocr?: boolean; ocrModel?: string; ocrEffort?: string | null; rulePath?: string; checkCmd?: string; autoReview?: boolean; autoRework?: boolean; maxRework?: number }) {
@@ -125,8 +132,17 @@ function patch(patch: { enabled?: boolean; from?: string; fromEffort?: string | 
 
 export function setup(ctx: PanelContext) {
   void refresh(ctx.signal)
+  // A worker that was idle-reaped, restarted, or lost its IPC pipe rejects the
+  // first fusion.status with "worker disconnected before responding". That error
+  // must not stick for the life of the panel: retry with backoff until a status
+  // payload lands, then stop (later edits surface their own errors).
+  let statusRetryAt = Date.now() + 5_000
   const tick = () => {
     if (ctx.signal.aborted) return
+    if (!read(status)?.data && Date.now() >= statusRetryAt) {
+      statusRetryAt = Date.now() + 5_000
+      void refresh(ctx.signal)
+    }
     const file = read(sessionFile)
     plugin.request('session.status', file ? { file } : {}, { signal: ctx.signal, timeoutMs: 10_000 })
       .then((data) => { if (!ctx.signal.aborted) set(session, { data: data as SessionStatus }) })
