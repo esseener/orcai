@@ -20,6 +20,7 @@ type PiCtx = {
   modelRegistry?: { getAvailable?(): PiModel[] }
   sessionManager?: { getSessionId?(): unknown; getSessionFile?(): unknown }
   ui?: { notify?(text: string, tone?: string): void }
+  abort?(): void
 }
 type Pi = {
   on(name: string, fn: (event: PiEvent, ctx: PiCtx) => unknown | Promise<unknown>): void
@@ -130,8 +131,9 @@ export default function (pi: Pi): void {
       const target = modelBySelector(ctx, selector)
       if (!target || typeof pi.setModel !== 'function') return false
       try {
-        const r = pi.setModel(target)
-        if (r && typeof (r as Promise<unknown>).then === 'function') await r
+        // setModel resolves false when the provider has no API key; treating
+        // that as success would run the turn on the previous model.
+        if (await pi.setModel(target) === false) return false
         const level = effortOf(selector)
         if (level && typeof pi.setThinkingLevel === 'function') {
           const s = pi.setThinkingLevel(level)
@@ -193,6 +195,7 @@ export default function (pi: Pi): void {
       boot(`route session=${f} phase=executing selector=${cfg.executor} ok=${ok}`)
       if (!ok) {
         ctx.ui?.notify?.(`Orzic: 执行模型不可用 ${cfg.executor}`, 'warning')
+        ctx.abort?.()
         throw new Error(`Orzic: 执行模型不可用 ${cfg.executor}`)
       }
       return
@@ -207,6 +210,9 @@ export default function (pi: Pi): void {
     boot(`route session=${f} phase=planning selector=${cfg.planner} ok=${ok}`)
     if (!ok) {
       ctx.ui?.notify?.(`Orzic: 规划模型不可用 ${cfg.planner}`, 'warning')
+      // Hook errors are logged and swallowed by the runner; abort is what
+      // actually stops this turn from running on the previous model.
+      ctx.abort?.()
       throw new Error(`Orzic: 规划模型不可用 ${cfg.planner}`)
     }
     ctx.ui?.notify?.(`Orzic: 规划 ${cfg.planner}`, 'info')

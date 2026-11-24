@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import loop from './orzic-loop.ts'
 
-const setup = (overrides = {}, models = [{ provider: 'planner', id: 'plan' }, { provider: 'executor', id: 'code' }]) => {
+const setup = (overrides = {}, models = [{ provider: 'planner', id: 'plan' }, { provider: 'executor', id: 'code' }], options = {}) => {
   const agent = mkdtempSync(join(tmpdir(), 'orzic-loop-'))
   process.env.ORZIC_AGENT_DIR = agent
   process.env.ORZIC_SPAWN_LOG = join(agent, 'spawn.json')
@@ -22,6 +22,7 @@ const setup = (overrides = {}, models = [{ provider: 'planner', id: 'plan' }, { 
 
   const handlers = {}
   const setModels = []
+  const aborts = []
   const levels = []
   const pi = {
     on: (name, fn) => {
@@ -32,7 +33,9 @@ const setup = (overrides = {}, models = [{ provider: 'planner', id: 'plan' }, { 
     },
     setModel: async (model) => {
       await new Promise((resolve) => setTimeout(resolve, 5))
-      setModels.push(`${model.provider}/${model.id}`)
+      const selector = `${model.provider}/${model.id}`
+      if (options.deny?.includes(selector)) return false
+      setModels.push(selector)
     },
     setThinkingLevel: (level) => { levels.push(level) },
   }
@@ -44,13 +47,14 @@ const setup = (overrides = {}, models = [{ provider: 'planner', id: 'plan' }, { 
     modelRegistry: { getAvailable: () => models },
     sessionManager: { getSessionFile: () => file },
     ui: { notify: () => {} },
+    abort: () => { aborts.push(file) },
   })
   const fire = async (name, event, ctx) => {
     const fn = handlers[name]
     if (fn) return fn(event, ctx)
   }
   const plans = () => readdirSync(agent).filter((f) => f.startsWith('orzic-plan-'))
-  return { agent, cwd, ctxFor, fire, plans, setModels, levels }
+  return { agent, cwd, ctxFor, fire, plans, setModels, aborts, levels }
 }
 
 test('session_start: shows the planner model by default', async () => {
@@ -97,10 +101,19 @@ test('after a handoff, a new review request returns to the planner', async () =>
   assert.equal(env.setModels.at(-1), 'planner/plan')
 })
 
-test('an unavailable planner fails closed instead of using the executor', async () => {
+test('an unavailable planner aborts and never applies the executor', async () => {
   const env = setup({}, [{ provider: 'executor', id: 'code' }])
   const ctx = env.ctxFor(join(env.agent, 'sessions', 'a4.jsonl'))
   await assert.rejects(env.fire('before_agent_start', { prompt: '审查并做计划' }, ctx), /规划模型不可用/)
+  assert.equal(env.aborts.length, 1)
+  assert.deepEqual(env.setModels, [])
+})
+
+test('setModel false aborts instead of falling back to the executor', async () => {
+  const env = setup({}, undefined, { deny: ['planner/plan'] })
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'a5.jsonl'))
+  await assert.rejects(env.fire('before_agent_start', { prompt: '审查并做计划' }, ctx), /规划模型不可用/)
+  assert.equal(env.aborts.length, 1)
   assert.deepEqual(env.setModels, [])
 })
 
