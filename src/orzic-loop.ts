@@ -11,7 +11,7 @@ import { basename, isAbsolute, join } from 'node:path'
 
 type PiModel = { provider?: string; id?: string }
 type PiEvent = {
-  prompt?: string; toolName?: string; willContinue?: boolean; awaitingAsyncWork?: boolean
+  prompt?: string; reason?: string; toolName?: string; willContinue?: boolean; awaitingAsyncWork?: boolean
   toolCallId?: string; isError?: boolean
   input?: Record<string, unknown>
 }
@@ -246,12 +246,20 @@ export default function (pi: Pi): void {
   pi.on('before_agent_start', async (e, ctx) => {
     if (!mainOnly(ctx)) return
     const f = pinSession(ctx)
-    if (!f) return
-    turnBySession.set(f, ++turnSeq)
     const cfg = readCfg()
     if (process.env.ORZIC_DRIVER) return
-    if (!cfg.autoRoute) { planning.delete(f); executing.delete(f); forgetPlanning(f); return }
+    if (!cfg.autoRoute) {
+      if (f) { planning.delete(f); executing.delete(f); forgetPlanning(f) }
+      return
+    }
     if (typeof e?.prompt !== 'string' || !e.prompt.trim()) return
+    if (!f) {
+      if (e.reason === 'revive') return
+      ctx.ui?.notify?.('Orzic: 拿不到会话文件，无法确认规划阶段，本轮停止。', 'warning')
+      ctx.abort?.()
+      throw new Error('Orzic: 缺少会话 pin')
+    }
+    turnBySession.set(f, ++turnSeq)
     hydrate(f)
     const resume = executing.has(f) && continuation.test(e.prompt.trim())
     if (resume) {
@@ -301,6 +309,13 @@ export default function (pi: Pi): void {
     const name = e?.toolName ?? ''
     const input = e?.input ?? {}
     const target = String(input.path ?? input.file_path ?? input.file ?? '')
+    const cfg = readCfg()
+    if (cfg.autoRoute && !process.env.ORZIC_DRIVER && !f) {
+      if (WRITE_TOOLS.has(name) || name === 'task') {
+        return { block: true, reason: 'Orzic: 拿不到会话文件，无法确认规划阶段；副作用工具已拦截。' }
+      }
+      return
+    }
     const plan = f && hydrate(f) ? planning.get(f) : undefined
     const turn = f ? turnBySession.get(f) ?? 0 : 0
     if (!plan) {
