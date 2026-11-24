@@ -112,6 +112,24 @@ test('resolveSession: pin to a different cwd → none, never falls back to guess
   assert.equal(r.exact, false); assert.equal(r.source, 'none')
 })
 
+test('resolveSession: sibling-prefix cwd is not an exact pin', () => {
+  const agent = mkAgent(); const root = join(agent, 'sessions')
+  const cwd = 'C:\\repo\\app'
+  const other = mkSession(root, 'C:\\repo\\app-other', '2026-01-01_a.jsonl')
+  const r = resolveSession({ pinnedFile: other, sessionsRoot: root, cwd })
+  assert.equal(r.exact, false, 'app-other must never match app')
+  assert.equal(r.source, 'none')
+})
+
+test('resolveSession: scan ignores a sibling-prefix cwd', () => {
+  const agent = mkAgent(); const root = join(agent, 'sessions')
+  const cwd = 'C:\\repo\\app'
+  mkSession(root, 'C:\\repo\\app-other', '2026-01-01_a.jsonl')
+  const r = resolveSession({ pinnedFile: null, sessionsRoot: root, cwd })
+  assert.equal(r.exact, false)
+  assert.equal(r.source, 'none', 'a prefix sibling is not evidence for this repo')
+})
+
 test('resolveSession: pin path that does not exist → scan-only, not exact', () => {
   const agent = mkAgent(); const root = join(agent, 'sessions')
   const cwd = 'C:\\repo\\same'
@@ -134,6 +152,7 @@ test('resolveSession: only-recent-sibling stays inexact — never inject by rece
 // ---------- driver integration ----------
 test('driver: judge failure verdicts failed (stub exits 1), never pass', () => {
   const agent = mkAgent(); const repo = mkRepo()
+  writeFileSync(join(agent, 'orzic-acceptance.json'), JSON.stringify({ autoReview: true, autoRework: false, maxRework: 3 }))
   const r = runDriver({ ORZIC_AGENT_DIR: agent, ORZIC_CWD: repo, ORZIC_OMP_BIN: NODE, ORZIC_OMP_PREARGS: JSON.stringify([STUB]), ORZIC_STUB_MODE: 'error' })
   assert.equal(r.status, 0)
   assert.equal(reviewOf(agent, repo).verdict, 'failed')
@@ -160,7 +179,7 @@ test('driver: ORZIC_SESSION_FILE pin → rework consumed + -r targets the pinned
   const root = join(agent, 'sessions')
   mkSession(root, repo, '2026-01-01_a.jsonl')
   const exact = mkSession(root, repo, '2026-01-02_b.jsonl')
-  writeFileSync(join(agent, 'orzic-acceptance.json'), JSON.stringify({ autoReview: true, autoRework: true, maxRework: 3 }))
+  writeFileSync(join(agent, 'orzic-acceptance.json'), JSON.stringify({ autoReview: true, autoRework: true, maxRework: 3, ocrModel: 'stub/judge' }))
   const r = runDriver({ ORZIC_AGENT_DIR: agent, ORZIC_CWD: repo, ORZIC_SESSION_FILE: exact, ORZIC_OMP_BIN: NODE, ORZIC_OMP_PREARGS: JSON.stringify([STUB]), ORZIC_STUB_MODE: 'rework' })
   assert.equal(r.status, 0)
   const review = reviewOf(agent, repo)
@@ -344,7 +363,7 @@ test('repoKey: real directories must never collide', () => {
 
 test('driver: revision dedup — two launches, same HEAD, judge called exactly once', () => {
   const agent = mkAgent(); const repo = mkRepo()
-  writeFileSync(join(agent, 'orzic-acceptance.json'), JSON.stringify({ autoReview: true, autoRework: true, maxRework: 3 }))
+  writeFileSync(join(agent, 'orzic-acceptance.json'), JSON.stringify({ autoReview: true, autoRework: true, maxRework: 3, ocrModel: 'stub/judge' }))
   const env = { ORZIC_AGENT_DIR: agent, ORZIC_CWD: repo, ORZIC_OMP_BIN: NODE, ORZIC_OMP_PREARGS: JSON.stringify([STUB]), ORZIC_STUB_MODE: 'pass' }
   assert.equal(runDriver(env).status, 0)
   assert.equal(runDriver(env).status, 0, 'second launch on same HEAD')
@@ -353,6 +372,77 @@ test('driver: revision dedup — two launches, same HEAD, judge called exactly o
   assert.equal(judgeCalls.length, 1, 'same revision+model+rules → judge not re-run')
   const review = reviewOf(agent, repo)
   assert.ok(review.dedupKey, 'verdict carries dedup key')
+})
+
+test('driver: autoReview=false neither judges nor injects', () => {
+  const agent = mkAgent(); const repo = mkRepo()
+  writeFileSync(join(agent, 'orzic-acceptance.json'), JSON.stringify({ autoReview: false, autoRework: true, maxRework: 3 }))
+  const r = runDriver({ ORZIC_AGENT_DIR: agent, ORZIC_CWD: repo, ORZIC_OMP_BIN: NODE, ORZIC_OMP_PREARGS: JSON.stringify([STUB]), ORZIC_STUB_MODE: 'rework' })
+  assert.equal(r.status, 0)
+  assert.equal(existsSync(join(agent, 'orzic-stub-calls.jsonl')), false, 'no judge call')
+  assert.equal(existsSync(join(agent, `orzic-review-${keyOf(repo)}.json`)), false, 'no verdict written')
+})
+
+test('driver: autoReview turned off during the judge → no inject', () => {
+  const agent = mkAgent(); const repo = mkRepo()
+  const exact = mkSession(join(agent, 'sessions'), repo, '2026-01-01_a.jsonl')
+  writeFileSync(join(agent, 'orzic-acceptance.json'), JSON.stringify({ autoReview: true, autoRework: true, maxRework: 3 }))
+  const r = runDriver({
+    ORZIC_AGENT_DIR: agent, ORZIC_CWD: repo, ORZIC_SESSION_FILE: exact,
+    ORZIC_OMP_BIN: NODE, ORZIC_OMP_PREARGS: JSON.stringify([STUB]),
+    ORZIC_STUB_MODE: 'rework', ORZIC_STUB_CFG_PATCH_ON_JUDGE: JSON.stringify({ autoReview: false }),
+  })
+  assert.equal(r.status, 0)
+  const review = reviewOf(agent, repo)
+  assert.equal(review.consumed, false)
+  assert.match(review.summary, /autoReview 已关闭/)
+  const calls = readFileSync(join(agent, 'orzic-stub-calls.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).args)
+  assert.equal(calls.filter((a) => a[0] === '-r').length, 0)
+})
+
+test('driver: autoRework turned off during the judge → verdict, no inject', () => {
+  const agent = mkAgent(); const repo = mkRepo()
+  const exact = mkSession(join(agent, 'sessions'), repo, '2026-01-01_a.jsonl')
+  writeFileSync(join(agent, 'orzic-acceptance.json'), JSON.stringify({ autoReview: true, autoRework: true, maxRework: 3 }))
+  const r = runDriver({
+    ORZIC_AGENT_DIR: agent, ORZIC_CWD: repo, ORZIC_SESSION_FILE: exact,
+    ORZIC_OMP_BIN: NODE, ORZIC_OMP_PREARGS: JSON.stringify([STUB]),
+    ORZIC_STUB_MODE: 'rework', ORZIC_STUB_CFG_PATCH_ON_JUDGE: JSON.stringify({ autoRework: false }),
+  })
+  assert.equal(r.status, 0)
+  const review = reviewOf(agent, repo)
+  assert.equal(review.consumed, false)
+  assert.match(review.summary, /autoRework 未启用/)
+  const calls = readFileSync(join(agent, 'orzic-stub-calls.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).args)
+  assert.equal(calls.filter((a) => a[0] === '-r').length, 0)
+})
+
+test('driver: cooperative stop during the judge → no inject', () => {
+  const agent = mkAgent(); const repo = mkRepo()
+  const exact = mkSession(join(agent, 'sessions'), repo, '2026-01-01_a.jsonl')
+  writeFileSync(join(agent, 'orzic-acceptance.json'), JSON.stringify({ autoReview: true, autoRework: true, maxRework: 3 }))
+  const r = runDriver({
+    ORZIC_AGENT_DIR: agent, ORZIC_CWD: repo, ORZIC_SESSION_FILE: exact,
+    ORZIC_OMP_BIN: NODE, ORZIC_OMP_PREARGS: JSON.stringify([STUB]),
+    ORZIC_STUB_MODE: 'rework', ORZIC_STUB_STOP_ON_JUDGE: '1',
+  })
+  assert.equal(r.status, 0)
+  const review = reviewOf(agent, repo)
+  assert.match(review.summary, /已手动停止/)
+  assert.equal(review.consumed, false)
+  const calls = readFileSync(join(agent, 'orzic-stub-calls.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).args)
+  assert.equal(calls.filter((a) => a[0] === '-r').length, 0)
+})
+
+test('driver: @default judge is not deduped across runs (model may change)', () => {
+  const agent = mkAgent(); const repo = mkRepo()
+  writeFileSync(join(agent, 'orzic-acceptance.json'), JSON.stringify({ autoReview: true, autoRework: true, maxRework: 3 }))
+  const env = { ORZIC_AGENT_DIR: agent, ORZIC_CWD: repo, ORZIC_OMP_BIN: NODE, ORZIC_OMP_PREARGS: JSON.stringify([STUB]), ORZIC_STUB_MODE: 'pass' }
+  assert.equal(runDriver(env).status, 0)
+  assert.equal(runDriver(env).status, 0)
+  const calls = readFileSync(join(agent, 'orzic-stub-calls.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).args)
+  assert.equal(calls.filter((a) => a[0] === '--model').length, 2, 'alias model must not reuse an old verdict')
+  assert.equal(reviewOf(agent, repo).dedupKey, undefined)
 })
 
 test('driver: deterministic gate — failing checkCmd returns rework WITHOUT calling the judge', () => {

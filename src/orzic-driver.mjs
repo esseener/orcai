@@ -181,13 +181,14 @@ try {
     checkStop() // synchronous per-round check — catches a stop written between interval ticks
     if (stopRequested) { writeReview({ at: new Date().toISOString(), verdict: 'unreviewed', findings: [], summary: `已手动停止(第${round}轮)`, round }); log(`stop flag — exit after round ${round}`); break }
     const acc = readAcc()
+    if (!acc.autoReview) { log('autoReview disabled — exit'); break }
     const head = await gitHead()
     const sha = head.out?.trim() || ''
     // Dedup key = revision + reviewer model + rule text + the GATE command —
     // a new/changed checkCmd is a different review, so an old PASS can never
     // bypass a freshly configured failing gate.
     const plan = planFor()
-    const dedupKey = sha ? `${sha}@@${judgeModel(acc)}@@${ruleFor(acc)}@@${acc.checkCmd || ''}@@${plan.digest}` : ''
+    const dedupKey = sha && acc.ocrModel ? `${sha}@@${acc.ocrModel}@@${ruleFor(acc)}@@${acc.checkCmd || ''}@@${plan.digest}` : ''
     const prev = (() => { try { return JSON.parse(readFileSync(REVIEW, 'utf8')) } catch { return null } })()
     // Deterministic gate BEFORE dedup AND before the paid judge: a gate is a
     // fresh review surface, so it must run even when the revision was already
@@ -218,25 +219,47 @@ try {
       const diff = await gitDiffAt(sha)
       if (diff.err) { writeReview({ at: new Date().toISOString(), verdict: 'failed', findings: [], summary: `git diff 失败:${diff.err}` }); log(`git diff failed ${diff.err}`); break }
       if (!diff.out.trim()) { if (!existsSync(REVIEW)) writeReview({ at: new Date().toISOString(), verdict: 'unreviewed', findings: [], summary: '无 diff', revision: sha || undefined, dedupKey: dedupKey || undefined }); log('no diff'); break }
+      checkStop()
+      if (stopRequested) { writeReview({ at: new Date().toISOString(), verdict: 'unreviewed', findings: [], summary: `已手动停止(第${round}轮)`, round }); log('stop before judge'); break }
       review = await judge(diff.out, acc, plan)
     }
 
+    // The judge can run for minutes; the stop flag and the acceptance config
+    // may both change while it runs. Re-read once, then decide injection.
+    checkStop()
+    const live = readAcc()
+    if (stopRequested) {
+      writeReview({ at: new Date().toISOString(), verdict: review.verdict, findings: review.findings, summary: `${review.summary}(已手动停止)`, round, consumed: false })
+      log('stop after judge — no inject')
+      break
+    }
+    if (!live.autoReview) {
+      writeReview({ at: new Date().toISOString(), verdict: review.verdict, findings: review.findings, summary: `${review.summary}(autoReview 已关闭)`, round, consumed: false })
+      log('autoReview disabled after judge — no inject')
+      break
+    }
 
   // Fail closed: injection requires BOTH a rework verdict and an exact pin.
   // Decide `consumed` BEFORE writing — never publish an unconsumed rework
   // verdict; a stale reader (or a sibling session's prompt) must never see a
   // transient state that looks feedable.
-  const canInject = acc.autoRework && round < acc.maxRework && sessionInfo.exact && sessionInfo.path
+  const canInject = live.autoRework && round < live.maxRework && sessionInfo.exact && sessionInfo.path
   const willInject = review.verdict === 'rework' && canInject
-  const capped = review.verdict === 'rework' && acc.autoRework && sessionInfo.exact && round >= acc.maxRework
+  const capped = review.verdict === 'rework' && live.autoRework && sessionInfo.exact && round >= live.maxRework
   const note = review.verdict !== 'rework' ? ''
     : willInject ? ''
-    : capped ? `(返工已达上限 ${acc.maxRework} 轮)`
+    : capped ? `(返工已达上限 ${live.maxRework} 轮)`
     : !sessionInfo.exact ? '(无精确 session,已仅评审不注入)'
-    : !acc.autoRework ? '(autoRework 未启用)' : ''
+    : !live.autoRework ? '(autoRework 未启用)' : ''
   writeReview({ ...review, kind: reviewKind, ...(gateKey ? { gateKey } : {}), round, consumed: Boolean(willInject) || capped, revision: sha || undefined, dedupKey: reviewKind === 'judge' ? (dedupKey || undefined) : undefined, ...(note ? { summary: `${review.summary}${note}` } : {}) })
   log(`round ${round} verdict=${review.verdict} findings=${review.findings.length}${capped ? ' cap-consumed' : ''}${note ? ` ${note}` : ''}`)
   if (!willInject) break
+  checkStop()
+  if (stopRequested) {
+    writeReview({ at: new Date().toISOString(), verdict: review.verdict, findings: review.findings, summary: `${review.summary}(已手动停止)`, round, consumed: false })
+    log('stop before inject — no rework turn')
+    break
+  }
 
   round++
   const findings = review.findings.slice(0, 10).map((f) => `- [${f.severity}] ${f.file}${f.line != null ? `:${f.line}` : ''} ${f.message}`).join('\n')

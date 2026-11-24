@@ -6,7 +6,7 @@
 // ORZIC_SESSION_FILE. Anything inferred from the filesystem (cwd match, mtime,
 // newest file) can collide with a sibling session in the same repo — so those
 // are ONLY used to prove a session exists, never to pick one.
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
@@ -32,17 +32,39 @@ export function resolveSession({ pinnedFile, sessionsRoot, cwd }) {
   return scanned ? { path: scanned, exact: false, source: 'scan' } : { path: null, exact: false, source: 'none' }
 }
 
-function sameCwdFile(file, cwd) {
+// A substring match is not enough: `C:\repo\app` is a prefix of
+// `C:\repo\app-other`. Parse the session header and compare normalized paths.
+function normalizePath(value) {
+  let p = String(value ?? '').trim()
+  if (!p) return ''
+  try { p = realpathSync(p) } catch { /* path may not exist; keep the header value */ }
+  p = p.replace(/\\/g, '/')
+  if (/^[a-zA-Z]:\//.test(p) || p.startsWith('//')) p = p.toLowerCase()
+  return p.replace(/\/+$/, '')
+}
+
+function sessionCwd(file) {
   try {
-    const head = readFileSync(file, 'utf8').slice(0, 4000)
-    const variants = [cwd, cwd.replace(/\\/g, '/'), cwd.replace(/\\/g, '\\\\')]
-    return variants.some((v) => head.includes(v))
-  } catch { return false }
+    const head = readFileSync(file, 'utf8').slice(0, 8000)
+    for (const line of head.split('\n')) {
+      if (!line.trim()) continue
+      try {
+        const d = JSON.parse(line)
+        if (d?.type === 'session' && typeof d.cwd === 'string') return d.cwd
+      } catch { /* skip partial/non-session lines */ }
+    }
+  } catch { /* unreadable */ }
+  return ''
+}
+
+function sameCwdFile(file, cwd) {
+  const want = normalizePath(cwd)
+  const got = normalizePath(sessionCwd(file))
+  return Boolean(want && got && want === got)
 }
 
 function scanNewest(sessionsRoot, cwd) {
   try {
-    const variants = [cwd, cwd.replace(/\\/g, '/'), cwd.replace(/\\/g, '\\\\')]
     let best = null, bestM = 0
     for (const dir of readdirSync(sessionsRoot)) {
       const dp = join(sessionsRoot, dir)
@@ -51,9 +73,7 @@ function scanNewest(sessionsRoot, cwd) {
       for (const f of files) {
         if (!f.endsWith('.jsonl')) continue
         const fp = join(dp, f)
-        let head = ''
-        try { head = readFileSync(fp, 'utf8').slice(0, 4000) } catch { continue }
-        if (!variants.some((v) => head.includes(v))) continue
+        if (!sameCwdFile(fp, cwd)) continue
         const m = statSync(fp).mtimeMs
         if (m > bestM) { bestM = m; best = fp }
       }

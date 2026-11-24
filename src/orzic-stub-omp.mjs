@@ -48,6 +48,26 @@ if (process.env.ORZIC_STUB_SLEEP_MS && args[0] === '-r') {
 if (mode === 'error') { process.stderr.write('stub error\n'); process.exit(1) }
 if (mode === 'empty') { process.exit(0) }
 
+// ORZIC_STUB_CFG_PATCH_ON_JUDGE='{"autoReview":false}': mutate the acceptance
+// config while the judge is running, to prove the driver re-reads it before
+// deciding whether to inject.
+const cfgPatch = process.env.ORZIC_STUB_CFG_PATCH_ON_JUDGE
+if (cfgPatch && args[0] === '--model') {
+  try {
+    const p = join(agent, 'orzic-acceptance.json')
+    const cfg = JSON.parse(readFileSync(p, 'utf8'))
+    writeFileSync(p, JSON.stringify({ ...cfg, ...JSON.parse(cfgPatch) }))
+  } catch { /* ignore */ }
+}
+
+// ORZIC_STUB_STOP_ON_JUDGE=1: write the cooperative stop flag while the judge
+// is running, so the driver must not start `omp -r` afterwards.
+if (process.env.ORZIC_STUB_STOP_ON_JUDGE && args[0] === '--model') {
+  let token = ''
+  try { token = readLock(join(agent, `orzic-driver-${key}.lock`))?.token ?? '' } catch { /* ignore */ }
+  try { writeFileSync(join(agent, `orzic-stop-${key}`), JSON.stringify({ at: new Date().toISOString(), token })) } catch { /* ignore */ }
+}
+
 const verdict = mode === 'rework' ? 'rework' : 'pass'
 const findings = verdict === 'rework' ? [{ severity: 'medium', file: 'a.ts', line: 1, message: 'stub finding' }] : []
 process.stdout.write(JSON.stringify({
