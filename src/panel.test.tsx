@@ -26,6 +26,8 @@ const models: OmpModel[] = [
 
 const fusion = {
   enabled: false, from: 'a6api/gpt-6.2-astra', fromEffort: null,
+  // Both rows use the same model on purpose: the thinking test then sees every
+  // level twice and must prove the planner's row is the one highlighted.
   into: 'a6api/gpt-6.2-astra', intoEffort: null,
   taskPrewalk: false, advisor: false, advisorModel: null, advisorEffort: null,
   ocr: false, ocrModel: null, ocrEffort: null, rulePath: null, checkCmd: null,
@@ -98,15 +100,28 @@ test('the selected thinking level is highlighted, not a gray ghost', async () =>
     }),
   })
   assert.deepEqual(mounted.errors, [])
-  const active = mounted.find({ type: 'Button', text: 'xhigh' })
-  assert.equal(active?.props.variant, 'solid')
-  assert.equal(active?.props.tone, 'accent')
-  // Every other level must stay visually quiet; checking only one would let a
-  // second highlighted button slip through.
+  const buttons = (label: string) => mounted!.findAll({ type: 'Button', text: label })
+  // The planner card is drawn before the executor card, so [0] is the planner
+  // row and [1] the executor row. Both use the same model, so every level is
+  // drawn twice; asserting the first occurrence is what keeps the check scoped.
+  const [plannerXhigh, executorXhigh] = buttons('xhigh')
+  assert.equal(plannerXhigh?.props.variant, 'solid')
+  assert.equal(plannerXhigh?.props.tone, 'accent')
+  assert.equal(executorXhigh?.props.variant, 'ghost')
+  assert.equal(executorXhigh?.props.tone, 'neutral')
+
   for (const label of ['默认', 'low', 'medium', 'high', 'max']) {
-    const idle = mounted.find({ type: 'Button', text: label })
-    assert.ok(idle, `${label} button should be drawn`)
-    assert.equal(idle.props.variant, 'ghost', `${label} must not look selected`)
-    assert.equal(idle.props.tone, 'neutral', `${label} must not carry the accent tone`)
+    const rows = buttons(label)
+    assert.equal(rows.length, 2, `${label} must be drawn in both rows`)
+    assert.equal(rows[0]?.props.variant, 'ghost', `planner ${label} must not look selected`)
+    assert.equal(rows[0]?.props.tone, 'neutral', `planner ${label} must not carry the accent tone`)
+    if (label !== '默认') {
+      assert.equal(rows[1]?.props.variant, 'ghost', `executor ${label} must not look selected`)
+      assert.equal(rows[1]?.props.tone, 'neutral')
+    }
   }
+  // The executor's own selected level is its default (`intoEffort: null`) and
+  // must be highlighted independently of the planner's xhigh.
+  const [plannerDefault] = buttons('默认')
+  assert.equal(plannerDefault?.props.variant, 'ghost')
 })
