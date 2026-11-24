@@ -1,8 +1,8 @@
-// Orzic loop: per-message routing + acceptance driver.
+// Orzic loop: plan-first routing + acceptance driver.
 //
-// 每条用户消息先交给一个便宜的分类器（executor 模型）判断：需要拆解就切规划
-// 模型，规划阶段用 tool_call 阻断除 PLAN.md 外的写入；写完 PLAN.md 立刻切回
-// 执行模型。不需要拆解则直接用执行模型。`agent_end` 仍启动会话外验收驱动。
+// Every new request starts on the planner; planning blocks bash and all writes
+// except PLAN.md. Only an explicit continuation after a successful PLAN.md
+// handoff stays on the executor. `agent_end` still starts external review.
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -90,6 +90,7 @@ export default function (pi: Pi): void {
   const wroteSessions = new Set<string>()
   const pinCwds = new Map<string, string>()
   const planning = new Map<string, { cwd: string }>()
+  const executing = new Set<string>()
 
   const pinSession = (ctx?: PiCtx): string => {
     try {
@@ -144,16 +145,10 @@ export default function (pi: Pi): void {
     return next
   }
 
-  // 零延迟启发式分类：OMP 启动一次要十几秒，消息级等不起模型判定。
-  // 明确延续/问答走 direct；跨文件或含拆解语义走 plan；其余按长度兜底。
-  const classify = async (_ctx: PiCtx, text: string): Promise<'plan' | 'direct'> => {
-    const t = String(text ?? '').trim()
-    if (!t) return 'direct'
-    if (t.length < 12 || /^(继续|好的|好|行|可以|ok|谢谢|再试|重试|跑一下|改一下)/i.test(t)) return 'direct'
-    if (t.length < 60 && /[?？]|吗$|什么|为什么|怎么用/.test(t)) return 'direct'
-    if (/(拆解|重构|迁移|实现|设计|方案|排查|跨文件|多个文件|先.*再|步骤|规划|架构|验收|测试|修复|bug|需求)/i.test(t)) return 'plan'
-    return t.length > 80 ? 'plan' : 'direct'
-  }
+  // A new task always starts with the planner. Only an explicit continuation
+  // after a PLAN.md handoff inherits the execution phase; this keeps review and
+  // planning requests on the planner instead of guessing from keywords/length.
+  const continuation = /^(?:继续(?:执行|实现)?|按计划(?:执行|实现)?|开始(?:执行|实现)?|执行计划|好(?:的)?|可以|行|ok|continue|proceed)[。！!.\s]*$/i
 
   const planPath = (key: string): string => join(agentRoot(), `orzic-plan-${key}.json`)
   const writePlan = (ctx: PiCtx, content: string): void => {
@@ -174,7 +169,10 @@ export default function (pi: Pi): void {
   }
 
   pi.on('session_start', async (_e, ctx) => {
-    boot(`session_start sf=${pinSession(ctx)}`)
+    const f = pinSession(ctx)
+    boot(`session_start sf=${f}`)
+    planning.delete(f)
+    executing.delete(f)
     const cfg = readCfg()
     if (!cfg.autoRoute || process.env.ORZIC_DRIVER || !cfg.planner) return
     const ok = await useModel(ctx, cfg.planner)
@@ -185,21 +183,33 @@ export default function (pi: Pi): void {
   pi.on('before_agent_start', async (e, ctx) => {
     const f = pinSession(ctx)
     if (!f) return
-    planning.delete(f)
     const cfg = readCfg()
     if (process.env.ORZIC_DRIVER) return
-    if (!cfg.autoRoute) { await useModel(ctx, cfg.executor); return }
+    if (!cfg.autoRoute) { planning.delete(f); executing.delete(f); return }
     if (typeof e?.prompt !== 'string' || !e.prompt.trim()) return
-    const route = await classify(ctx, e.prompt)
-    if (route === 'plan' && cfg.planner) {
-      planning.set(f, { cwd: ctx.cwd })
-      const ok = await useModel(ctx, cfg.planner)
-      if (!ok) planning.delete(f)
-      ctx.ui?.notify?.(ok ? `Orzic: 规划 ${cfg.planner}` : `Orzic: 规划模型不可用 ${cfg.planner}`, ok ? 'info' : 'warning')
-    } else {
+    const resume = executing.has(f) && continuation.test(e.prompt.trim())
+    if (resume) {
       const ok = await useModel(ctx, cfg.executor)
-      ctx.ui?.notify?.(ok ? 'Orzic: 直接执行' : `Orzic: 执行模型不可用 ${cfg.executor}`, ok ? 'info' : 'warning')
+      boot(`route session=${f} phase=executing selector=${cfg.executor} ok=${ok}`)
+      if (!ok) {
+        ctx.ui?.notify?.(`Orzic: 执行模型不可用 ${cfg.executor}`, 'warning')
+        throw new Error(`Orzic: 执行模型不可用 ${cfg.executor}`)
+      }
+      return
     }
+    executing.delete(f)
+    planning.set(f, { cwd: ctx.cwd })
+    if (!cfg.planner) {
+      ctx.ui?.notify?.('Orzic: 未配置规划模型，本轮停止。', 'warning')
+      throw new Error('Orzic: 未配置规划模型')
+    }
+    const ok = await useModel(ctx, cfg.planner)
+    boot(`route session=${f} phase=planning selector=${cfg.planner} ok=${ok}`)
+    if (!ok) {
+      ctx.ui?.notify?.(`Orzic: 规划模型不可用 ${cfg.planner}`, 'warning')
+      throw new Error(`Orzic: 规划模型不可用 ${cfg.planner}`)
+    }
+    ctx.ui?.notify?.(`Orzic: 规划 ${cfg.planner}`, 'info')
   })
 
   pi.on('tool_call', async (e, ctx) => {
@@ -212,13 +222,15 @@ export default function (pi: Pi): void {
     if (!plan) return
     if (name === 'bash') return { block: true, reason: '规划阶段只读；计划完成后会自动切换到执行模型。' }
     if (name === 'write' || name === 'edit' || name === 'ast_edit' || name === 'notebook') {
-      if (!/PLAN\.md$/i.test(target)) return { block: true, reason: '规划阶段只允许写 PLAN.md；先完成计划。' }
+      if (!/(?:^|[\\/:])PLAN\.md$/i.test(target)) return { block: true, reason: '规划阶段只允许写 PLAN.md；先完成计划。' }
       if (name === 'write') {
-        writePlan(ctx, String(input.content ?? ''))
-        planning.delete(f)
+        const content = String(input.content ?? '')
+        if (!content.trim()) return { block: true, reason: '计划内容为空；请先把完整计划写入 PLAN.md。' }
+        writePlan(ctx, content)
       }
       const ok = await useModel(ctx, readCfg().executor)
       boot(`plan switch selector=${readCfg().executor} ok=${ok} model=${ctx.model?.provider}/${ctx.model?.id}`)
+      if (ok) { planning.delete(f); executing.add(f) }
     }
   })
 

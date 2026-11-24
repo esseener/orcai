@@ -11,10 +11,12 @@ OMP 原生 plan mode 的侧栏调度器 + 自动验收循环。面板「开始�
 
 ## 规划/执行路由
 
-- **规划模型** = `modelRoles.plan`（进入 plan mode 时切换）
-- **执行模型** = `modelRoles.default`（退出 plan mode 时恢复）
-- **开始任务** = 面板把 `{sessionFile, goal}` 写进会话邮箱，扩展在 1 秒内进入 plan mode 并发送任务；session 不匹配则忽略
-- **自动批准** = 面板发起的任务在 `plan_review_requested` 时调用 `resolvePlanReview(reviewId,'keep')`
+- **规划模型** = `modelRoles.plan`；**执行模型** = `modelRoles.default`
+- **新任务先规划**：每条新请求（包括“审查一下 / 做个计划”）都切规划模型；不再按关键词或字数猜成执行
+- **执行阶段**：只有本轮成功写入 `PLAN.md` 后才切执行模型；此后只有“继续 / 按计划执行 / 好 / ok”这类**不含新指令**的短句保持执行模型
+- **重新规划**：执行阶段出现新的审查、修改或计划要求，回到规划模型
+- **规划只读**：`bash` 全阻断，写工具只允许 `PLAN.md`；空计划或写入失败不交接
+- **模型不可用**：本轮中止并提示，绝不静默降级到另一个模型
 - **子代理同规则** = 内置 task 子代理也启用(`task.prewalk`)
 - 会话卡实时显示当前模型、最近工具和模型切换时间线；多会话可切换查看
 
@@ -76,7 +78,7 @@ node --test src/orzic-driver.test.mjs src/orzic-verdict.test.mjs src/orzic-model
 | `src/panel.tsx` | 侧栏:fusion 配置 / 会话卡 / 验收开关+手动验收 / driver 状态条+停止+强杀;配置与模型目录分两路加载 |
 | `src/protocol.ts` | `PluginRequests` 声明 + `AcceptanceCfg`/`ReviewVerdict`/`Finding`/`ReviewOut`/`FusionState`/`SessionStatus` |
 | `src/orzic-models.mjs` | `omp models ls` 的缓存 + single-flight:并发/重试共享一次 CLI,失败拒绝而不是返回空目录 |
-| `src/orzic-loop.ts` | OMP 扩展:`before_agent_start` 恢复规划模型;`tool_call` 标 `wroteThisTurn`;`agent_end` 捕获 `ctx.sessionManager.getSessionFile()` → 写 `ORZIC_SESSION_FILE` env → spawn detached driver;`prompt_submit` 自审兜底(仅 `!consumed` rework) |
+| `src/orzic-loop.ts` | OMP 扩展:新请求切规划模型、只有明确继续才用执行模型;`tool_call` 阻断规划期写入（仅 `PLAN.md`）;`agent_end` 捕获 `ctx.sessionManager.getSessionFile()` → 写 `ORZIC_SESSION_FILE` env → spawn detached driver |
 | `src/orzic-driver.mjs` | Detached Node driver:锁 + session pin + gitDiff → judge(omp)→ verdict 写盘 → rework 则 `omp -r` 注入;每轮重读 `orzic-acceptance.json` |
 | `src/orzic-verdict.mjs` | `--mode json` ndjson → `message_end` assistant text → verdict(`pass`/`rework`/`failed`/`unreviewed`)严格解析,失败不 pass |
 | `src/orzic-models.mjs` | 模型目录 60s 缓存 + 单飞;`omp models ls` 失败/超时向上抛错,不降级成空列表 |

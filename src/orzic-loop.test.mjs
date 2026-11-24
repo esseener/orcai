@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import loop from './orzic-loop.ts'
 
-const setup = (overrides = {}) => {
+const setup = (overrides = {}, models = [{ provider: 'planner', id: 'plan' }, { provider: 'executor', id: 'code' }]) => {
   const agent = mkdtempSync(join(tmpdir(), 'orzic-loop-'))
   process.env.ORZIC_AGENT_DIR = agent
   process.env.ORZIC_SPAWN_LOG = join(agent, 'spawn.json')
@@ -23,7 +23,6 @@ const setup = (overrides = {}) => {
   const handlers = {}
   const setModels = []
   const levels = []
-  const models = [{ provider: 'planner', id: 'plan' }, { provider: 'executor', id: 'code' }]
   const pi = {
     on: (name, fn) => {
       const previous = handlers[name]
@@ -62,21 +61,47 @@ test('session_start: shows the planner model by default', async () => {
   assert.deepEqual(env.setModels, ['planner/plan'])
 })
 
-test('session_start planner switch cannot override a fast direct message', async () => {
+test('regression: a review-and-plan request stays on the planner', async () => {
   const env = setup()
   const ctx = env.ctxFor(join(env.agent, 'sessions', 'r.jsonl'))
-  const start = env.fire('session_start', {}, ctx)
-  const direct = env.fire('before_agent_start', { prompt: '好' }, ctx)
-  await Promise.all([start, direct])
-  assert.equal(env.setModels.at(-1), 'executor/code')
+  await env.fire('session_start', {}, ctx)
+  // The exact prompt from the sheet-metal project: length and phrasing used to
+  // classify it as direct execution, skipping the configured planner.
+  await env.fire('before_agent_start', { prompt: '重新审查一下这个项目，然后把前面没有做完的内容把它拉出来，做个计划。' }, ctx)
+  assert.deepEqual(env.setModels, ['planner/plan', 'planner/plan'])
 })
 
-test('direct: a short continuation stays on the executor', async () => {
+test('a new session treats a short message as planning, not execution', async () => {
   const env = setup()
   const ctx = env.ctxFor(join(env.agent, 'sessions', 'a.jsonl'))
   await env.fire('before_agent_start', { prompt: '好' }, ctx)
-  assert.deepEqual(env.setModels, ['executor/code'])
+  assert.deepEqual(env.setModels, ['planner/plan'])
   assert.equal(env.plans().length, 0)
+})
+
+test('after a PLAN.md handoff, an explicit continuation keeps the executor', async () => {
+  const env = setup()
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'a2.jsonl'))
+  await env.fire('before_agent_start', { prompt: '重构验收循环，拆解成步骤再实现' }, ctx)
+  await env.fire('tool_call', { toolName: 'write', input: { path: 'PLAN.md', content: '# PLAN' } }, ctx)
+  await env.fire('before_agent_start', { prompt: '继续' }, ctx)
+  assert.deepEqual(env.setModels, ['planner/plan', 'executor/code', 'executor/code'])
+})
+
+test('after a handoff, a new review request returns to the planner', async () => {
+  const env = setup()
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'a3.jsonl'))
+  await env.fire('before_agent_start', { prompt: '重构验收循环，拆解成步骤再实现' }, ctx)
+  await env.fire('tool_call', { toolName: 'write', input: { path: 'PLAN.md', content: '# PLAN' } }, ctx)
+  await env.fire('before_agent_start', { prompt: '再审查一下整个项目，做个计划' }, ctx)
+  assert.equal(env.setModels.at(-1), 'planner/plan')
+})
+
+test('an unavailable planner fails closed instead of using the executor', async () => {
+  const env = setup({}, [{ provider: 'executor', id: 'code' }])
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'a4.jsonl'))
+  await assert.rejects(env.fire('before_agent_start', { prompt: '审查并做计划' }, ctx), /规划模型不可用/)
+  assert.deepEqual(env.setModels, [])
 })
 
 test('plan: routes to planner and blocks non-plan writes and bash', async () => {
