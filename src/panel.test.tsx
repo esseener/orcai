@@ -38,7 +38,7 @@ const requests = {
   'fusion.status': { models, fusion },
   'models.list': models,
   'session.status': {} as never,
-  'session.list': [],
+  'session.list': { sessions: [], activeError: null },
   'acceptance.result': {} as never,
 }
 
@@ -118,7 +118,7 @@ test('shows recent sessions with their own model and hides old records', async (
       model: 'model-alpha', thinking: 'high', stage: 'executing' as const, lastTool: 'edit', lastToolAt: '2026-11-24T05:00:00.000Z',
     },
     {
-      file: 'C:\\sessions\\beta.jsonl', dir: 'sessions', ageMs: 2_000, active: false, recent: true, sessionId: 'beta', hostState: 'done' as const, title: 'Beta', cwd: 'C:\\work\\beta',
+      file: 'C:\\sessions\\beta.jsonl', dir: 'sessions', ageMs: 2_000, active: true, recent: true, sessionId: 'beta', hostState: 'working' as const, title: 'Beta', cwd: 'C:\\work\\beta',
       model: 'model-beta', thinking: null, stage: 'planning' as const, lastTool: null, lastToolAt: null,
     },
     {
@@ -131,7 +131,7 @@ test('shows recent sessions with their own model and hides old records', async (
     },
   ]
   mounted = await mount(panel, {
-    host: mockHost({ requests: { ...requests, 'session.list': rows } }),
+    host: mockHost({ requests: { ...requests, 'session.list': { sessions: rows, activeError: null } } }),
   })
   assert.deepEqual(mounted.errors, [])
   await mounted.settled()
@@ -155,6 +155,62 @@ test('shows recent sessions with their own model and hides old records', async (
   const statusCalls = (mounted.host.callsOf('plugin.request') as { name: string }[])
     .filter((call) => call.name === 'session.status')
   assert.equal(statusCalls.length, 0)
+})
+
+test('an agent status event updates the matching session immediately', async () => {
+  type EventRow = {
+    file: string; dir: string; ageMs: number; active: boolean; recent: boolean; sessionId: string;
+    hostState: 'working' | 'done'; title: string; cwd: string; model: string; thinking: string | null;
+    stage: 'executing'; lastTool: string | null; lastToolAt: string | null;
+  }
+  let rows: EventRow[] = [
+    {
+      file: 'C:\\sessions\\alpha.jsonl', dir: 'sessions', ageMs: 1_000, active: true, recent: true, sessionId: 'alpha', hostState: 'working', title: 'Alpha', cwd: 'C:\\work\\alpha',
+      model: 'model-alpha', thinking: null, stage: 'executing' as const, lastTool: null, lastToolAt: null,
+    },
+    {
+      file: 'C:\\sessions\\beta.jsonl', dir: 'sessions', ageMs: 1_000, active: true, recent: true, sessionId: 'beta', hostState: 'working', title: 'Beta', cwd: 'C:\\work\\beta',
+      model: 'model-beta', thinking: null, stage: 'executing' as const, lastTool: null, lastToolAt: null,
+    },
+  ]
+  mounted = await mount(panel, {
+    host: mockHost({ requests: { ...requests, 'session.list': () => ({ sessions: rows, activeError: null }) } }),
+  })
+  assert.deepEqual(mounted.errors, [])
+  await mounted.settled()
+  assert.equal(mounted.findAll({ type: 'Badge', text: '执行' }).length, 2)
+  assert.match(mounted.find({ text: /2 个活跃/ })?.text ?? '', /2 个活跃/)
+
+  rows = rows.map((row) => row.sessionId === 'alpha' ? { ...row, hostState: 'done' as const, active: false } : row)
+  await mounted.emit('agent.status.changed', {
+    workspaceId: null, paneKey: 'pane', state: 'done', receivedAt: Date.now(), sessionId: 'alpha',
+  })
+  await mounted.settled()
+  // Alpha is still recent, but no longer claims to be executing; Beta is untouched.
+  assert.ok(mounted.find({ type: 'Badge', text: '已结束' }))
+  assert.equal(mounted.findAll({ type: 'Badge', text: '执行' }).length, 1)
+  assert.match(mounted.find({ text: /1 个活跃/ })?.text ?? '', /1 个活跃/)
+})
+
+test('surfaces a live-state read failure without hiding recent sessions', async () => {
+  mounted = await mount(panel, {
+    host: mockHost({
+      requests: {
+        ...requests,
+        'session.list': {
+          sessions: [{
+            file: 'C:\\sessions\\alpha.jsonl', dir: 'sessions', ageMs: 1_000, active: false, recent: true, sessionId: 'alpha', hostState: null,
+            title: 'Alpha', cwd: 'C:\\work\\alpha', model: 'model-alpha', thinking: null, stage: 'idle' as const, lastTool: null, lastToolAt: null,
+          }],
+          activeError: 'agent:read denied',
+        },
+      },
+    }),
+  })
+  assert.deepEqual(mounted.errors, [])
+  await mounted.settled()
+  assert.ok(mounted.find({ text: /实时活跃状态不可用.*agent:read denied/ }))
+  assert.ok(mounted.find({ text: 'Alpha' }))
 })
 
 test('session order keeps every seen file in its original slot', () => {

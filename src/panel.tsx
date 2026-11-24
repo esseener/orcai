@@ -1,6 +1,7 @@
 import { atom, Badge, Box, Button, Card, Checkbox, EmptyState, IconButton, Image, Input, KeyValue, on, plugin, read, Row, Separator, set, Stack, Tab, Tabs, Text, Textarea, type PanelContext } from 'orca'
 import type { FusionState, OmpModel, SessionStage, SessionStatus } from './protocol'
 import { filterModelChoices, isFusionModel } from './orzic-models.mjs'
+import { RECENT_WINDOW_MINUTES, applyHostState, sessionVisible } from './orzic-session-state.mjs'
 
 const status = atom<{ data?: { models?: OmpModel[]; fusion: FusionState }; error?: string } | null>(null)
 const modelList = atom<OmpModel[]>([])
@@ -15,6 +16,7 @@ type SessionListState = { state: 'idle' | 'loading' | 'ready' | 'error'; error: 
 const sessionList = atom<SessionRow[]>([])
 const sessionOrder = atom<string[]>([])
 const sessionListState = atom<SessionListState>({ state: 'idle', error: null })
+const activeError = atom<string | null>(null)
 const reviewResults = atom<Record<string, ReviewResult>>({})
 const reviewingRepos = atom<Record<string, number>>({})
 const driverStates = atom<Record<string, DriverState>>({})
@@ -121,7 +123,7 @@ async function stopAcceptance(force: boolean) {
 const busy = atom(false)
 const editing = atom<string | null>(null)
 const draft = atom<Record<string, { model?: string; effort?: string | null; search?: string }>>({})
-const PLUGIN_VERSION = '0.1.23'
+const PLUGIN_VERSION = '0.1.24'
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function stageLabel(stage: SessionStage): string {
@@ -199,8 +201,9 @@ async function loadSessionList(sig: AbortSignal): Promise<SessionRow[] | null> {
   listBusy = true
   if (read(sessionListState).state === 'idle') set(sessionListState, { state: 'loading', error: null })
   try {
-    const rows = await plugin.request('session.list', {}, { signal: sig, timeoutMs: 10_000 }) as SessionRow[]
+    const response = await plugin.request('session.list', {}, { signal: sig, timeoutMs: 10_000 }) as { sessions: SessionRow[]; activeError: string | null }
     if (sig.aborted) return null
+    const rows = response.sessions
     // Keep known files in their slots and append new sessions. A deleted
     // record simply stops appearing; a read failure never reaches this branch.
     const order = mergeSessionOrder(read(sessionOrder), rows.map((row) => row.file))
@@ -208,6 +211,7 @@ async function loadSessionList(sig: AbortSignal): Promise<SessionRow[] | null> {
     const byFile = new Map(rows.map((row) => [row.file, row]))
     const live = order.flatMap((file) => { const row = byFile.get(file); return row ? [row] : [] })
     set(sessionList, live)
+    set(activeError, response.activeError)
     set(sessionListState, { state: 'ready', error: null })
     return live
   } catch (e) {
@@ -250,6 +254,15 @@ async function loadAcceptance(sig: AbortSignal) {
 export function setup(ctx: PanelContext) {
   panelAbort = ctx.signal
   listBusy = false
+  // Status events update the matching row immediately; the 3s poll remains as
+  // a calibration for new/removed sessions and missed events.
+  const agentsSub = on('agent.status.changed', (payload) => {
+    if (ctx.signal.aborted) return
+    if (payload.sessionId) {
+      set(sessionList, read(sessionList).map((row) => applyHostState(row, payload.sessionId ?? null, payload.state)))
+    }
+    void loadSessionList(ctx.signal)
+  })
   void refresh(ctx.signal)
   void fetchModels(ctx.signal)
   // `fusion.status` can fail transiently (worker restart, IPC drop) or keep
@@ -285,6 +298,7 @@ export function setup(ctx: PanelContext) {
   const stop = () => {
     if (panelAbort !== ctx.signal) return
     clearInterval(timer)
+    agentsSub.dispose()
     panelAbort = null
     acceptanceAbort?.abort()
     acceptanceRepo = null
@@ -409,15 +423,26 @@ function projectName(cwd: string | null): string {
   return cwd ? cwd.split(/[\\/]/).filter(Boolean).pop() ?? '' : ''
 }
 
+function sessionBadge(row: SessionRow): { label: string; tone: 'neutral' | 'accent' | 'success' | 'warning' | 'danger' } {
+  if (row.hostState === 'working') return { label: stageLabel(row.stage), tone: stageTone(row.stage) }
+  if (row.hostState === 'blocked') return { label: '阻塞', tone: 'danger' }
+  if (row.hostState === 'waiting') return { label: '等待', tone: 'warning' }
+  if (row.hostState === 'done') return { label: '已结束', tone: 'neutral' }
+  return { label: '最近', tone: 'neutral' }
+}
+
 function sessionsCard(rows: SessionRow[], listState: SessionListState) {
-  const visible = rows.filter((row) => row.recent || (row.hostState !== null && row.hostState !== 'done'))
+  const visible = rows.filter(sessionVisible)
   const active = visible.filter((row) => row.active).length
   const description = visible.length
-    ? `${visible.length} 个会话${active ? ` · ${active} 个活跃` : ''} · 最近 20 分钟`
-    : listState.state === 'ready' ? '最近 20 分钟没有进行中的会话' : 'OMP 会话'
+    ? `${visible.length} 个会话${active ? ` · ${active} 个活跃` : ''} · 最近 ${RECENT_WINDOW_MINUTES} 分钟`
+    : listState.state === 'ready' ? `最近 ${RECENT_WINDOW_MINUTES} 分钟没有进行中的会话` : 'OMP 会话'
   return (
     <Card title="OMP 会话" description={description}>
       <Stack gap="sm">
+        {read(activeError) && (
+          <Text size="xs" tone="warning">实时活跃状态不可用：{read(activeError)}（仅显示近期记录）</Text>
+        )}
         {listState.state === 'error' && (
           <Text size="xs" tone="warning">列表刷新失败：{listState.error}（保留上次结果，下个周期重试）</Text>
         )}
@@ -427,29 +452,32 @@ function sessionsCard(rows: SessionRow[], listState: SessionListState) {
         {visible.length === 0 && (listState.state === 'idle' || listState.state === 'loading') && (
           <Text size="xs" muted>正在读取会话…</Text>
         )}
-        {visible.map((row, index) => (
-          <Stack key={row.file} gap="sm">
-            {index > 0 && <Separator />}
-            <Stack gap="xs">
-              <Row justify="between" align="start" gap="sm">
-                <Text size="sm" weight="medium">{sessionTitle(row)}</Text>
-                <Badge tone={stageTone(row.stage)}>{stageLabel(row.stage)}</Badge>
-              </Row>
-              <Stack gap="none">
-                <Text size="xs" muted>模型</Text>
-                <Text size="sm">{row.model ?? '未知'}{row.thinking ? ` · ${row.thinking}` : ''}</Text>
+        {visible.map((row, index) => {
+          const badge = sessionBadge(row)
+          return (
+            <Stack key={row.file} gap="sm">
+              {index > 0 && <Separator />}
+              <Stack gap="xs">
+                <Row justify="between" align="start" gap="sm">
+                  <Text size="sm" weight="medium">{sessionTitle(row)}</Text>
+                  <Badge tone={badge.tone}>{badge.label}</Badge>
+                </Row>
+                <Stack gap="none">
+                  <Text size="xs" muted>模型</Text>
+                  <Text size="sm">{row.model ?? '未知'}{row.thinking ? ` · ${row.thinking}` : ''}</Text>
+                </Stack>
+                <Row justify="between" gap="sm" align="center" wrap>
+                  <Text size="xs" muted>
+                    {row.lastTool
+                      ? `最近工具 ${row.lastTool}${row.lastToolAt ? ` · ${new Date(row.lastToolAt).toLocaleTimeString()}` : ''}`
+                      : '还没有工具调用记录'}
+                  </Text>
+                  <Text size="xs" muted>{[row.active ? '活跃' : null, projectName(row.cwd)].filter(Boolean).join(' · ')}</Text>
+                </Row>
               </Stack>
-              <Row justify="between" gap="sm" align="center" wrap>
-                <Text size="xs" muted>
-                  {row.lastTool
-                    ? `最近工具 ${row.lastTool}${row.lastToolAt ? ` · ${new Date(row.lastToolAt).toLocaleTimeString()}` : ''}`
-                    : '还没有工具调用记录'}
-                </Text>
-                <Text size="xs" muted>{[row.active ? '活跃' : null, projectName(row.cwd)].filter(Boolean).join(' · ')}</Text>
-              </Row>
             </Stack>
-          </Stack>
-        ))}
+          )
+        })}
       </Stack>
     </Card>
   )

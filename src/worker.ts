@@ -207,10 +207,6 @@ export default function activate(orca: OrcaWorkerApi): void {
 }
 // Live session: newest session .jsonl, model/thinking switch timeline + last tool.
 const sessionsRoot = join(homedir(), '.omp', 'agent', 'sessions')
-// A conversation stays visible for 20 minutes after its last write, so the
-// list does not turn into an archive. Real activity comes from Orca's agent
-// status, never from the file mtime.
-const RECENT_WINDOW_MS = 20 * 60_000
 
 type SessionFile = { file: string; dir: string; mtime: number }
 type HostAgentState = 'working' | 'blocked' | 'waiting' | 'done'
