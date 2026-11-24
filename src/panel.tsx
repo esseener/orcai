@@ -373,14 +373,16 @@ function sessionCard(f?: FusionState, driver: DriverState | null = null) {
 		<Box padding="md">
 			<Stack gap="md">
 				<Row align="center" gap="none">
-					<Box width={64} shrink={false}><Image src="assets/logo5.png" alt="Orcai" size="full" fit="contain" /></Box>
-					<Box width={100} shrink={false} margin="none"><Image src="assets/word.png" alt="" size="xs" fit="contain" /></Box>
+					<Box width={100} shrink={false}><Image src="assets/word.png" alt="Orcai" size="xs" fit="contain" /></Box>
 				</Row>
 				<Tabs label="Orcai 功能模块" value={read(activeTab)} onChange={(value) => set(activeTab, value)}>
 					<Tab value="orzic" label="Orzic">
 						<Stack gap="md">
 							<Row justify="between" align="center" gap="sm">
-								<Text size="sm" weight="medium">规划 → 执行 → 验收</Text>
+								<Row align="center" gap="xs">
+									<Box width={20} height={20} shrink={false}><Image src="assets/logo5.png" alt="Orzic" size="full" fit="contain" /></Box>
+									<Text size="sm" weight="medium">规划 → 执行 → 验收</Text>
+								</Row>
 								{f && <Badge tone={f.enabled ? 'accent' : 'neutral'}>{f.enabled ? '规划路由开' : '规划路由关'}</Badge>}
 							</Row>
 							<Text size="xs" muted>规划阶段只读，写完 PLAN.md 后切执行模型</Text>

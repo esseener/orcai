@@ -33,7 +33,7 @@
 # 1. 更新上面四处版本号，并把 CHANGELOG 的 Unreleased 移到对应版本
 npm run check:version
 npm run typecheck
-node --test src/*.test.mjs
+npm test
 npm run smoke:omp
 # 2. 提交后打标签
 git tag -a v0.1.18 -m "v0.1.18"
@@ -154,7 +154,7 @@ npm run smoke:omp
 
 ```powershell
 npm run typecheck
-node --test src/*.test.mjs
+npm test
 npm run smoke:omp
 ```
 

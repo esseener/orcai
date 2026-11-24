@@ -95,10 +95,25 @@ test('Orcai exposes Orzic and 便签 as separate modules', async () => {
   assert.deepEqual(mounted.errors, [])
   // The panel is the Orcai container; each tab is one module.
   assert.deepEqual(mounted.findAll({ type: 'Tab' }).map((tab) => tab.text), ['Orzic', '便签'])
-  // Routing status belongs to the Orzic module, not the global header.
-  assert.equal(mounted.find({ text: '规划路由关' })?.text, '规划路由关')
+  const images = (alt: string) => mounted!.findAll({ type: 'Image' }).filter((image) => image.props.alt === alt)
+  const orzicTab = mounted.find({ type: 'Tab', text: 'Orzic' })
+  const routingBadge = mounted.find({ text: '规划路由关' })
+  const orzicMark = images('Orzic')[0]
+  const wordmark = images('Orcai')[0]
+  assert.ok(orzicTab)
+  assert.ok(routingBadge)
+  assert.ok(orzicMark)
+  assert.ok(wordmark)
+  // The Orcai wordmark is global; the Orzic mark and routing badge sit inside the Orzic Tab subtree.
+  assert.equal(images('Orcai').length, 1)
+  assert.equal(images('Orzic').length, 1)
+  assert.ok(!wordmark.path.startsWith(`${orzicTab.path}/`), `wordmark ${wordmark.path} should be outside ${orzicTab.path}`)
+  assert.ok(orzicMark.path.startsWith(`${orzicTab.path}/`), `Orzic mark ${orzicMark.path} should be inside ${orzicTab.path}`)
+  assert.ok(routingBadge.path.startsWith(`${orzicTab.path}/`), `routing badge ${routingBadge.path} should be inside ${orzicTab.path}`)
   await mounted.select({ type: 'Tabs' }, 'notes')
   assert.equal(mounted.find({ type: 'EmptyState', label: '还没有便签' })?.label, '还没有便签')
+  assert.equal(images('Orcai').length, 1)
+  assert.equal(images('Orzic').length, 0)
   assert.equal(mounted.find({ text: '规划路由关' }), null)
 })
 
