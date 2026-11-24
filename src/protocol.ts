@@ -24,6 +24,7 @@ export type FusionState = {
   autoReview: boolean
   autoRework: boolean
   maxRework: number
+  criteria: string
   routing: RoutingRules
 }
 
@@ -44,6 +45,7 @@ export type AcceptanceCfg = {
   ocr: boolean; ocrModel: string | null; ocrEffort: string | null; rulePath: string | null
   checkCmd: string | null; autoReview: boolean; autoRework: boolean; maxRework: number
   autoRoute: boolean; planner: string | null; executor: string | null
+  criteria: string
   routing: RoutingRules
 }
 export type ReviewVerdict = 'pass' | 'rework' | 'unreviewed' | 'failed' | 'no-repo' | 'none'

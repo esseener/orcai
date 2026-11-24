@@ -1,6 +1,6 @@
 {
   "name": "orcai",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Orca sidebar for OMP: plan/execute model routing, live agent sessions, and out-of-session acceptance review.",
   "private": true,
   "license": "MIT",

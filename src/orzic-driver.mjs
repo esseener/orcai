@@ -23,6 +23,7 @@ import { verdictFromOutput } from './orzic-verdict.mjs'
 import { acquireLock, heartbeatLock, releaseLock } from './orzic-lock.mjs'
 import { resolveSession } from './orzic-session.mjs'
 import { repoKey } from './orzic-repokey.mjs'
+import { DEFAULT_ACCEPTANCE_CRITERIA } from './orzic-acceptance-default.mjs'
 // Test seams: ORZIC_AGENT_DIR redirects all state; ORZIC_OMP_BIN + ORZIC_OMP_PREARGS
 // (JSON array) replace the omp binary (e.g. node + stub.mjs). Prod never sets them.
 const AGENT = process.env.ORZIC_AGENT_DIR || join(homedir(), '.omp', 'agent')
@@ -51,11 +52,12 @@ const readAcc = () => {
       ocrEffort: typeof d.ocrEffort === 'string' ? d.ocrEffort : null,
       rulePath: typeof d.rulePath === 'string' ? d.rulePath : null,
       checkCmd: typeof d.checkCmd === 'string' ? d.checkCmd.trim() : '',
+      criteria: typeof d.criteria === 'string' ? d.criteria : DEFAULT_ACCEPTANCE_CRITERIA,
       autoReview: d.autoReview === true, autoRework: d.autoRework === true,
       maxRework: typeof d.maxRework === 'number' && d.maxRework > 0 ? d.maxRework : 3,
     }
   } catch {
-    return { ocr: false, ocrModel: null, ocrEffort: null, rulePath: null, autoReview: false, autoRework: false, maxRework: 3, checkCmd: '' }
+    return { ocr: false, ocrModel: null, ocrEffort: null, rulePath: null, autoReview: false, autoRework: false, maxRework: 3, checkCmd: '', criteria: DEFAULT_ACCEPTANCE_CRITERIA }
   }
 }
 
@@ -105,6 +107,15 @@ const gitDiffAt = async (sha) => {
   return git(['diff', `${sha}~1..${sha}`])
 }
 
+// Review everything the approved plan produced, not just the final commit.
+// Multi-commit work (runtime + docs/tests) must not be judged from its tail.
+const gitDiffRange = async (base, head) => {
+  if (!base || !head || base === head) return gitDiffAt(head)
+  const anc = await git(['merge-base', '--is-ancestor', base, head])
+  if (anc.err) return gitDiffAt(head)
+  return git(['diff', `${base}..${head}`])
+}
+
 const ruleFor = (acc) => {
   if (!acc.rulePath) return '检查常见缺陷:空输入、除零、未捕获错误、边界、注入'
   try {
@@ -116,18 +127,20 @@ const ruleFor = (acc) => {
 const planFor = () => {
   try {
     const d = JSON.parse(readFileSync(PLAN, 'utf8'))
-    if (!d || d.approved !== true || typeof d.planContent !== 'string') return { text: '', digest: 'none' }
+    if (!d || d.approved !== true || typeof d.planContent !== 'string') return { text: '', digest: 'none', base: '' }
     const pinned = process.env.ORZIC_SESSION_FILE || ''
-    if (!pinned || d.sessionFile !== pinned) return { text: '', digest: 'unpinned' }
-    return { text: d.planContent.slice(0, 20000), digest: String(d.digest || 'nodigest') }
-  } catch { return { text: '', digest: 'none' } }
+    if (!pinned || d.sessionFile !== pinned) return { text: '', digest: 'unpinned', base: '' }
+    return { text: d.planContent.slice(0, 20000), digest: String(d.digest || 'nodigest'), base: typeof d.baseRevision === 'string' ? d.baseRevision : '' }
+  } catch { return { text: '', digest: 'none', base: '' } }
 }
 
 const judgeModel = (acc) => acc.ocrModel || '@default'
 const judge = async (diff, acc, plan) => {
   const model = judgeModel(acc)
+  const criteria = (acc.criteria || DEFAULT_ACCEPTANCE_CRITERIA).trim()
+  const criteriaBlock = criteria ? `\n验收标准(逐条核对,不满足即 finding):\n${criteria}\n` : ''
   const planBlock = plan.text ? `\n已批准的计划(实现须与之一致,偏离即 finding):\n${plan.text}\n` : ''
-  const prompt = `你是代码验收评审。按规则审以下 git diff,只输出 JSON(无其他文字):{"verdict":"pass|rework","findings":[{"severity":"low|medium|high|blocker","file":"","line":0,"message":""}]}。规则:${ruleFor(acc)}${planBlock}\ndiff:\n${diff.slice(0, 120000)}`
+  const prompt = `你是代码验收评审。按规则审以下 git diff,只输出 JSON(无其他文字):{"verdict":"pass|rework","findings":[{"severity":"low|medium|high|blocker","file":"","line":0,"message":""}]}。规则:${ruleFor(acc)}${criteriaBlock}${planBlock}\ndiff:\n${diff.slice(0, 120000)}`
   const { out, err } = await run(['--model', model, '--mode', 'json', '--no-session', '--no-extensions', '--no-prewalk', prompt], 280_000)
   return verdictFromOutput(out, { error: err, model })
 }
@@ -196,7 +209,8 @@ try {
     // a new/changed checkCmd is a different review, so an old PASS can never
     // bypass a freshly configured failing gate.
     const plan = planFor()
-    const dedupKey = sha && acc.ocrModel ? `${sha}@@${acc.ocrModel}@@${ruleFor(acc)}@@${acc.checkCmd || ''}@@${plan.digest}` : ''
+    const base = plan.base || ''
+    const dedupKey = sha && acc.ocrModel ? `${sha}@@${base}@@${acc.ocrModel}@@${ruleFor(acc)}@@${acc.checkCmd || ''}@@${acc.criteria || ''}@@${plan.digest}` : ''
     const prev = (() => { try { return JSON.parse(readFileSync(REVIEW, 'utf8')) } catch { return null } })()
     // Deterministic gate BEFORE dedup AND before the paid judge: a gate is a
     // fresh review surface, so it must run even when the revision was already
@@ -224,7 +238,7 @@ try {
       log(`skip: ${sha.slice(0, 10)} already reviewed → ${prev.verdict}`); break
     }
     if (!review) {
-      const diff = await gitDiffAt(sha)
+      const diff = await gitDiffRange(base, sha)
       if (diff.err) { writeReview({ at: new Date().toISOString(), verdict: 'failed', findings: [], summary: `git diff 失败:${diff.err}` }); log(`git diff failed ${diff.err}`); break }
       if (!diff.out.trim()) { if (!existsSync(REVIEW)) writeReview({ at: new Date().toISOString(), verdict: 'unreviewed', findings: [], summary: '无 diff', revision: sha || undefined, dedupKey: dedupKey || undefined }); log('no diff'); break }
       checkStop()

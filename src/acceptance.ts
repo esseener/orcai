@@ -8,6 +8,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { commandError, ompExecutable } from './cli'
 import { repoKeyFor } from './repokey'
+import { DEFAULT_ACCEPTANCE_CRITERIA } from './orzic-acceptance-default.mjs'
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { AcceptanceCfg, Finding, ReviewOut } from './protocol'
 
@@ -68,6 +69,12 @@ const ruleFor = (cwd: string, rulePath: string | null): string => {
   if (!rulePath) return '检查常见缺陷:空输入、除零、未捕获错误、边界、注入'
   try { const d = JSON.parse(readFileSync(join(cwd, rulePath), 'utf8')) as { rules?: { rule?: string }[] }; return (d.rules ?? []).map((r) => r.rule).filter(Boolean).join(';') || '检查常见缺陷' } catch { return '检查常见缺陷' }
 }
+const runCheck = (cwd: string, cmd: string): Promise<string | null> => new Promise((resolve) => {
+  execFile(process.platform === 'win32' ? 'cmd' : 'sh', process.platform === 'win32' ? ['/d', '/s', '/c', cmd] : ['-c', cmd], { encoding: 'utf8', cwd, timeout: 120_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (e, out, stderr) => {
+    if (!e) return resolve(null)
+    resolve(`${stderr || out || String(e)}`.slice(0, 400))
+  })
+})
 const planFor = (cwd: string): string => {
   try {
     const d = JSON.parse(readFileSync(join(homedir(), '.omp', 'agent', `orzic-plan-${repoKeyFor(cwd)}.json`), 'utf8')) as { approved?: boolean; planContent?: string }
@@ -81,9 +88,11 @@ const ompJudge = (cwd: string, acc: AcceptanceCfg | null, commit?: string, from?
     if (!diff.trim()) return resolve({ verdict: 'unreviewed', findings: [], summary: '无 diff' })
     const model = acc?.ocrModel ?? '@default'
     const rule = ruleFor(cwd, acc?.rulePath ?? null)
+    const criteria = (typeof acc?.criteria === 'string' ? acc.criteria : DEFAULT_ACCEPTANCE_CRITERIA).trim()
+    const criteriaBlock = criteria ? `\n验收标准(逐条核对,不满足即 finding):\n${criteria}\n` : ''
     const plan = planFor(cwd)
     const planBlock = plan ? `\n已批准的计划(实现须与之一致,偏离即 finding):\n${plan}\n` : ''
-    const prompt = `你是代码验收评审。按规则审以下 git diff,只输出 JSON(无其他文字):{"verdict":"pass|rework","findings":[{"severity":"low|medium|high|blocker","file":"","line":0,"message":""}]}。规则:${rule}${planBlock}
+    const prompt = `你是代码验收评审。按规则审以下 git diff,只输出 JSON(无其他文字):{"verdict":"pass|rework","findings":[{"severity":"low|medium|high|blocker","file":"","line":0,"message":""}]}。规则:${rule}${criteriaBlock}${planBlock}
 
 diff:
 ${diff.slice(0, 120000)}`
@@ -126,6 +135,12 @@ export async function acceptanceReview(orca: OrcaWorkerApi, input: { repo?: stri
   const acc = (await orca.storage.get('acceptance').catch(() => null)) as AcceptanceCfg | null
   const repo = input.repo?.trim()
   if (!repo || !existsSync(join(repo, '.git'))) return { verdict: 'no-repo' as const, findings: [], summary: `repo 无效:${repo ?? '(空)'}` }
+  // Same deterministic gate as the detached driver: a failing check is a
+  // REWORK without spending an AI review call.
+  if (acc?.checkCmd?.trim()) {
+    const checkErr = await runCheck(repo, acc.checkCmd.trim())
+    if (checkErr) return { verdict: 'rework' as const, findings: [{ severity: 'high', file: '(check)', line: null, message: checkErr }], summary: `check 失败:${checkErr.slice(0, 200)}` }
+  }
   // 默认走 OMP 池判定(复用认证);ocr 装了+启用才用外部判定。
   if (!acc?.ocr) return ompJudge(repo, acc, input.commit, input.from, input.to)
   const args = ['review']

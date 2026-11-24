@@ -2,6 +2,7 @@ import { atom, Badge, Box, Button, Card, Checkbox, EmptyState, IconButton, Image
 import type { FusionState, OmpModel, RoutingRules, SessionStage, SessionStatus } from './protocol'
 import { filterModelChoices, isFusionModel } from './orzic-models.mjs'
 import { DEFAULT_ROUTING, normalizeRoutingRules } from './orzic-routing.mjs'
+import { DEFAULT_ACCEPTANCE_CRITERIA } from './orzic-acceptance-default.mjs'
 import { RECENT_WINDOW_MINUTES, applyHostState, mergeHostOverrides, sessionVisible, sortSessions } from './orzic-session-state.mjs'
 
 const status = atom<{ data?: { models?: OmpModel[]; fusion: FusionState }; error?: string } | null>(null)
@@ -28,6 +29,7 @@ const noteBody = atom('')
 const editingNote = atom<string | null>(null)
 const noteMessage = atom('')
 const activeTab = atom('orzic')
+const criteriaDraft = atom<string | null>(null)
 
 function startNote(note?: Note) {
   set(editingNote, note?.id ?? '')
@@ -89,11 +91,17 @@ async function runReview() {
   const repo = currentRepo()
   const sig = panelAbort
   if (!repo || !sig || sig.aborted || read(reviewingRepos)[repo]) return
+  const pendingCriteria = read(criteriaDraft)
+  if (pendingCriteria !== null) {
+    const saved = await patch({ criteria: pendingCriteria })
+    if (!saved || sig.aborted) return
+    set(criteriaDraft, null)
+  }
   const seq = ++reviewSeq
   latestReview.set(repo, seq)
   set(reviewingRepos, { ...read(reviewingRepos), [repo]: seq })
   try {
-    const r = await plugin.request('acceptance.review', { repo }, { signal: sig, timeoutMs: 115_000 })
+    const r = await plugin.request('acceptance.review', { repo }, { signal: sig, timeoutMs: 420_000 })
     if (!sig.aborted && latestReview.get(repo) === seq) {
       set(reviewResults, { ...read(reviewResults), [repo]: r as ReviewResult })
     }
@@ -125,7 +133,7 @@ const editing = atom<string | null>(null)
 const draft = atom<Record<string, { model?: string; effort?: string | null; search?: string }>>({})
 const rulesOpen = atom(false)
 const rulesDraft = atom<RoutingRules | null>(null)
-const PLUGIN_VERSION = '0.2.4'
+const PLUGIN_VERSION = '0.2.5'
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function stageLabel(stage: SessionStage): string {
@@ -182,15 +190,15 @@ async function fetchModels(signal: AbortSignal, force = false) {
   } finally { fetchingModels = false }
 }
 
-function patch(patch: { enabled?: boolean; from?: string; fromEffort?: string | null; into?: string; intoEffort?: string | null; taskPrewalk?: boolean; advisor?: boolean; advisorModel?: string; advisorEffort?: string | null; ocr?: boolean; ocrModel?: string; ocrEffort?: string | null; rulePath?: string; checkCmd?: string; autoReview?: boolean; autoRework?: boolean; maxRework?: number; routing?: RoutingRules }) {
+function patch(patch: { enabled?: boolean; from?: string; fromEffort?: string | null; into?: string; intoEffort?: string | null; taskPrewalk?: boolean; advisor?: boolean; advisorModel?: string; advisorEffort?: string | null; ocr?: boolean; ocrModel?: string; ocrEffort?: string | null; rulePath?: string; checkCmd?: string; autoReview?: boolean; autoRework?: boolean; maxRework?: number; criteria?: string; routing?: RoutingRules }): Promise<boolean> {
   const entry = read(status)
-  if (!entry?.data || read(busy)) return
+  if (!entry?.data || read(busy)) return Promise.resolve(false)
   set(busy, true)
   const previous = entry.data.fusion
   set(status, { data: { ...entry.data, fusion: { ...previous, ...patch } } })
-  void plugin.request('fusion.set', patch, { signal, timeoutMs: 15_000 })
-    .then((next) => { set(draft, {}); if (!signal.aborted) set(status, { data: { ...entry.data, fusion: next } }) })
-    .catch((error) => { set(draft, {}); if (!signal.aborted) set(status, { data: { ...entry.data, fusion: previous }, error: message(error) }) })
+  return plugin.request('fusion.set', patch, { signal, timeoutMs: 15_000 })
+    .then((next) => { set(draft, {}); if (!signal.aborted) set(status, { data: { ...entry.data, fusion: next } }); return true })
+    .catch((error) => { set(draft, {}); if (!signal.aborted) set(status, { data: { ...entry.data, fusion: previous }, error: message(error) }); return false })
     .finally(() => set(busy, false))
 }
 
@@ -199,7 +207,8 @@ function lines(value: unknown): string[] {
 }
 
 function openRules(f: FusionState) {
-  set(rulesDraft, normalizeRoutingRules(f.routing))
+  const current = normalizeRoutingRules(f.routing)
+  set(rulesDraft, current.presetVersion === 1 ? current : normalizeRoutingRules(DEFAULT_ROUTING))
   set(rulesOpen, true)
 }
 
@@ -215,12 +224,20 @@ function saveRules() {
   closeRules()
 }
 
+function saveCriteria() {
+  const value = read(criteriaDraft)
+  if (value === null) return
+  void patch({ criteria: value }).then((saved) => { if (saved) set(criteriaDraft, null) })
+}
+
 function rulesEditor(f: FusionState) {
-  const rules = read(rulesDraft) ?? normalizeRoutingRules(f.routing)
+  const current = normalizeRoutingRules(f.routing)
+  const rules = read(rulesDraft) ?? (current.presetVersion === 1 ? current : normalizeRoutingRules(DEFAULT_ROUTING))
   const update = (next: Partial<RoutingRules>) => set(rulesDraft, normalizeRoutingRules({ ...rules, ...next }))
   return (
     <Box padding="sm" radius="md" background="muted">
       <Stack gap="sm">
+        <Text size="xs" muted>固定门禁：必须成功写入非空 PLAN.md 才会交接；下面只控制消息和计划内容。</Text>
         <Checkbox
           label="保留内置识别"
           description="继续、执行、重新规划等默认短语仍然有效"
@@ -558,6 +575,7 @@ function sessionsCard(rows: SessionRow[], listState: SessionListState) {
 	export default function Panel() {
 	const entry = read(status)
 	const f = entry?.data?.fusion
+	const criteriaDirty = f ? read(criteriaDraft) !== null && read(criteriaDraft) !== f.criteria : false
 	const fetched = read(modelList)
 	const models = read(modelLoaded) ? fetched : entry?.data?.models ?? []
 	const repo = currentRepo()
@@ -609,6 +627,7 @@ function sessionsCard(rows: SessionRow[], listState: SessionListState) {
 												<Text size="sm" weight="medium">切换规则</Text>
 												<Text size="xs" muted>
 													{f.routing.useBuiltin ? '内置识别开' : '仅自定义'} · {f.routing.replanPhrases.length} 回规划 · {f.routing.executePhrases.length} 继续 · {f.routing.planRequired.length} 必含
+													{normalizeRoutingRules(f.routing).presetVersion !== 1 ? ' · 常用规则未保存' : ''}
 												</Text>
 											</Stack>
 											<Button size="sm" variant="ghost" disabled={read(busy)} onPress={() => read(rulesOpen) ? closeRules() : openRules(f)}>
@@ -632,8 +651,18 @@ function sessionsCard(rows: SessionRow[], listState: SessionListState) {
 								</Card>
 							)}
 							{entry?.data && f && (
-								<Card title="验收" description="独立模型审查产出，可自动返工">
+								<Card title="验收" description="计划、标准与规则共同判定，可自动返工">
 									<Stack gap="sm">
+										<Textarea label="验收标准" value={read(criteriaDraft) ?? f.criteria ?? DEFAULT_ACCEPTANCE_CRITERIA} rows={5} maxLength={4000} placeholder="逐条写清什么算通过；保存后传给验收模型" onChange={(value) => set(criteriaDraft, String(value))} />
+										{criteriaDirty && (
+											<Row justify="between" align="center" gap="sm">
+												<Text size="xs" muted>标准有未保存修改；保存或直接运行验收都会先写入。</Text>
+												<Row gap="xs">
+													<Button size="sm" disabled={read(busy)} onPress={saveCriteria}>保存标准</Button>
+													<Button size="sm" variant="ghost" onPress={() => set(criteriaDraft, null)}>取消</Button>
+												</Row>
+											</Row>
+										)}
 										<Box padding="sm" radius="md" background="muted">
 											<Stack gap="sm">
 												<Checkbox label="advisor 验收" description="逐回合审查（advisor 模型）" checked={f.advisor} disabled={read(busy)} onChange={(c) => patch({ advisor: c })} />
@@ -642,27 +671,28 @@ function sessionsCard(rows: SessionRow[], listState: SessionListState) {
 										</Box>
 										<Box padding="sm" radius="md" background="muted">
 											<Stack gap="sm">
-												<Checkbox label="ocr 判定式验收" description="按 rule.json 与 findings 判定 PASS / REWORK" checked={f.ocr} disabled={read(busy)} onChange={(c) => patch({ ocr: c })} />
+												<Checkbox label="ocr 判定式验收" description="启用外部 ocr 判定；关闭则用 OMP 评审模型" checked={f.ocr} disabled={read(busy)} onChange={(c) => patch({ ocr: c })} />
 												{f.ocr && modelPicker('ocr', '审查模型', '需要 ocr 端点可用', f.ocrModel, f.ocrEffort, models, 'ocr')}
-												{f.ocr && <Input label="rule.json" value={f.rulePath ?? ''} onChange={(v) => patch({ rulePath: String(v) })} />}
-												{f.ocr && <Input label="check 命令（确定性门禁）" value={f.checkCmd ?? ''} onChange={(v) => patch({ checkCmd: String(v) })} />}
-												{f.ocr && <Checkbox label="执行完自动验收" description="写完代码的轮次自动跑 ocr review" checked={f.autoReview} disabled={read(busy)} onChange={(c) => patch({ autoReview: c })} />}
-												{f.ocr && f.autoReview && <Checkbox label="REWORK 自动返工" description="把 findings 注入会话返工（最多 3 轮）" checked={f.autoRework} disabled={read(busy)} onChange={(c) => patch({ autoRework: c })} />}
 											</Stack>
 										</Box>
-										{f.ocr && <Separator />}
-										{f.ocr && (
-											<Row justify="between" align="center">
-												<Button size="sm" disabled={!repo || reviewRunning || read(busy)} onPress={() => void runReview()}>
-													{reviewRunning ? '审查中…' : '运行验收'}
-												</Button>
-												{review && (
-													<Badge tone={({ pass: 'success', rework: 'danger', unreviewed: 'neutral', 'no-repo': 'warning', failed: 'danger' } as Record<string, 'success' | 'danger' | 'neutral' | 'warning'>)[review!.verdict] ?? 'neutral'}>
-														{({ pass: 'PASS', rework: 'REWORK', unreviewed: '未审查', 'no-repo': '无仓库', failed: '失败' } as Record<string, string>)[review!.verdict] ?? review!.verdict}
-													</Badge>
-												)}
-											</Row>
-										)}
+										<Box padding="sm" radius="md" background="muted">
+											<Stack gap="sm">
+												<Input label="rule.json" value={f.rulePath ?? ''} onChange={(v) => patch({ rulePath: String(v) })} />
+												<Input label="check 命令（确定性门禁）" value={f.checkCmd ?? ''} onChange={(v) => patch({ checkCmd: String(v) })} />
+												<Checkbox label="执行完自动验收" description="写完代码的轮次自动跑验收" checked={f.autoReview} disabled={read(busy)} onChange={(c) => patch({ autoReview: c })} />
+												{f.autoReview && <Checkbox label="REWORK 自动返工" description="把 findings 注入会话返工（最多 3 轮）" checked={f.autoRework} disabled={read(busy)} onChange={(c) => patch({ autoRework: c })} />}
+											</Stack>
+										</Box>
+										<Row justify="between" align="center">
+											<Button size="sm" disabled={!repo || reviewRunning || read(busy)} onPress={() => void runReview()}>
+												{reviewRunning ? '审查中…' : '运行验收'}
+											</Button>
+											{review && (
+												<Badge tone={({ pass: 'success', rework: 'danger', unreviewed: 'neutral', 'no-repo': 'warning', failed: 'danger' } as Record<string, 'success' | 'danger' | 'neutral' | 'warning'>)[review!.verdict] ?? 'neutral'}>
+													{({ pass: 'PASS', rework: 'REWORK', unreviewed: '未审查', 'no-repo': '无仓库', failed: '失败' } as Record<string, string>)[review!.verdict] ?? review!.verdict}
+												</Badge>
+											)}
+										</Row>
 									{review && (
 										<Box padding="sm" radius="md" background="muted">
 											<Stack gap="xs">

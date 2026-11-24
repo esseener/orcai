@@ -32,6 +32,7 @@ const fusion = {
   taskPrewalk: false, advisor: false, advisorModel: null, advisorEffort: null,
   ocr: false, ocrModel: null, ocrEffort: null, rulePath: null, checkCmd: null,
   autoReview: false, autoRework: false, maxRework: 3,
+  criteria: '必须通过项目现有的类型检查、测试和构建命令。',
   routing: { useBuiltin: true, replanPhrases: [], executePhrases: [], planRequired: [] },
 }
 
@@ -117,6 +118,15 @@ test('routing rules can be edited and saved from the panel', async () => {
   mounted = await mount(panel, { host: mockHost({ requests }) })
   assert.deepEqual(mounted.errors, [])
   await mounted.press({ text: '编辑规则' })
+  assert.match(String(mounted.valueOf({ label: '回到规划的短语' })), /重新规划/)
+  assert.match(String(mounted.valueOf({ label: '继续执行的短语' })), /开始执行/)
+  assert.match(mounted.find({ text: /固定门禁/ })?.text ?? '', /必须成功写入非空 PLAN\.md/)
+  const beforeSave = (mounted.host.callsOf('plugin.request') as { name: string }[]).filter((call) => call.name === 'fusion.set')
+  assert.deepEqual(beforeSave, [])
+  await mounted.type({ label: '回到规划的短语' }, '', { replace: true })
+  await mounted.press({ text: '填入常用规则' })
+  assert.match(String(mounted.valueOf({ label: '回到规划的短语' })), /重新规划/)
+  assert.deepEqual((mounted.host.callsOf('plugin.request') as { name: string }[]).filter((call) => call.name === 'fusion.set'), [])
   await mounted.type({ label: '回到规划的短语' }, '换个方案\n先评估', { replace: true })
   await mounted.type({ label: '继续执行的短语' }, '开始实现', { replace: true })
   await mounted.type({ label: 'PLAN.md 必含内容' }, '## 步骤', { replace: true })
@@ -133,6 +143,35 @@ test('routing rules can be edited and saved from the panel', async () => {
       planRequired: ['## 步骤'],
     },
   }])
+})
+
+test('saving cleared routing keeps an explicit empty marker', async () => {
+  mounted = await mount(panel, { host: mockHost({ requests }) })
+  assert.deepEqual(mounted.errors, [])
+  await mounted.press({ text: '编辑规则' })
+  await mounted.type({ label: '回到规划的短语' }, '', { replace: true })
+  await mounted.type({ label: '继续执行的短语' }, '', { replace: true })
+  await mounted.type({ label: 'PLAN.md 必含内容' }, '', { replace: true })
+  await mounted.press({ text: '保存规则' })
+  const writes = (mounted.host.callsOf('plugin.request') as { name: string; input: unknown }[])
+    .filter((call) => call.name === 'fusion.set')
+    .map((call) => call.input as { routing: unknown })
+  assert.equal(writes.length, 1)
+  const saved = writes[0]?.routing as { presetVersion?: number; replanPhrases: string[]; executePhrases: string[] }
+  assert.equal(saved.presetVersion, 1)
+  assert.deepEqual(saved.replanPhrases, [])
+  assert.deepEqual(saved.executePhrases, [])
+})
+
+test('an explicitly saved empty routing reopens empty', async () => {
+  const routing = { useBuiltin: true, presetVersion: 1, replanPhrases: [], executePhrases: [], planRequired: [] }
+  mounted = await mount(panel, {
+    host: mockHost({ requests: { ...requests, 'fusion.status': { models, fusion: { ...fusion, routing } } } }),
+  })
+  assert.deepEqual(mounted.errors, [])
+  await mounted.press({ text: '编辑规则' })
+  assert.equal(String(mounted.valueOf({ label: '回到规划的短语' })), '')
+  assert.equal(String(mounted.valueOf({ label: '继续执行的短语' })), '')
 })
 
 test('shows recent sessions with their own model and hides old records', async () => {
@@ -241,6 +280,65 @@ test('surfaces a live-state read failure without hiding recent sessions', async 
   await mounted.settled()
   assert.ok(mounted.find({ text: /实时活跃状态不可用.*agent:read denied/ }))
   assert.ok(mounted.find({ text: 'Alpha' }))
+})
+
+test('acceptance criteria are prefilled and manual review works without ocr', async () => {
+  mounted = await mount(panel, { host: mockHost({ requests }) })
+  assert.deepEqual(mounted.errors, [])
+  assert.match(String(mounted.valueOf({ label: '验收标准' })), /必须通过项目现有的类型检查/)
+  assert.ok(mounted.find({ text: '运行验收' }), 'manual review must be visible even when ocr is off')
+
+  await mounted.type({ label: '验收标准' }, '不得新增依赖。', { replace: true })
+  await mounted.press({ text: '保存标准' })
+  await mounted.settled()
+  const writes = (mounted.host.callsOf('plugin.request') as { name: string; input: unknown }[])
+    .filter((call) => call.name === 'fusion.set')
+  assert.deepEqual(writes.at(-1)?.input, { criteria: '不得新增依赖。' })
+})
+
+test('manual review without ocr saves pending criteria and calls the worker', async () => {
+  const repo = 'C:\\work\\acceptance'
+  mounted = await mount(panel, {
+    host: mockHost({
+      requests: {
+        ...requests,
+        'session.list': {
+          sessions: [{
+            file: 'C:\\sessions\\acceptance.jsonl', dir: 'sessions', ageMs: 1_000, active: true, recent: true, sessionId: 'acceptance',
+            hostState: 'working' as const, title: 'Acceptance', cwd: repo, model: 'model-a', thinking: null, stage: 'executing' as const,
+            lastTool: null, lastToolAt: null,
+          }],
+          activeError: null,
+        },
+        'acceptance.review': { verdict: 'pass', summary: 'ok', findings: [] },
+      },
+    }),
+  })
+  assert.deepEqual(mounted.errors, [])
+  await mounted.settled()
+  await mounted.type({ label: '验收标准' }, '不得新增运行时依赖。', { replace: true })
+  await mounted.press({ text: '运行验收' })
+  await mounted.settled()
+  const writes = (mounted.host.callsOf('plugin.request') as { name: string; input: unknown }[])
+  assert.deepEqual(writes.find((call) => call.name === 'fusion.set')?.input, { criteria: '不得新增运行时依赖。' })
+  assert.deepEqual(writes.find((call) => call.name === 'acceptance.review')?.input, { repo })
+})
+
+test('a failed criteria save keeps the edit visible', async () => {
+  mounted = await mount(panel, {
+    host: mockHost({
+      requests: {
+        ...requests,
+        'fusion.set': () => { throw new Error('criteria save failed') },
+      },
+    }),
+  })
+  assert.deepEqual(mounted.errors, [])
+  await mounted.type({ label: '验收标准' }, '不得新增依赖。', { replace: true })
+  await mounted.press({ text: '保存标准' })
+  await mounted.settled()
+  assert.equal(String(mounted.valueOf({ label: '验收标准' })), '不得新增依赖。')
+  assert.ok(mounted.find({ text: /criteria save failed/ }))
 })
 
 test('cancelling routing edits leaves the saved rules untouched', async () => {

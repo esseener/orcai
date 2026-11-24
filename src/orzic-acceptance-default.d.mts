@@ -1,0 +1,1 @@
+export const DEFAULT_ACCEPTANCE_CRITERIA: string

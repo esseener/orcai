@@ -527,6 +527,22 @@ test('routing: a custom re-plan phrase wins over the built-in matcher', async ()
   assert.deepEqual(env.setModels, ['planner/plan', 'executor/code', 'planner/plan'])
 })
 
+test('routing: built-in re-plan wins over a saved execution preset', async () => {
+  const env = setup({ routing: { useBuiltin: true, presetVersion: 1, replanPhrases: [], executePhrases: ['开始执行'], planRequired: [] } })
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'r2b.jsonl'))
+  await enterExecution(env, ctx)
+  await env.fire('before_agent_start', { prompt: '先评估风险，再决定是否开始执行' }, ctx)
+  assert.deepEqual(env.setModels, ['planner/plan', 'executor/code', 'planner/plan'])
+})
+
+test('routing: a question containing bare 开始 stays on the planner', async () => {
+  const env = setup()
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'r2c.jsonl'))
+  await enterExecution(env, ctx)
+  await env.fire('before_agent_start', { prompt: '这次会议什么时候开始？' }, ctx)
+  assert.deepEqual(env.setModels, ['planner/plan', 'executor/code', 'planner/plan'])
+})
+
 test('routing: PLAN.md must contain every configured marker before handoff', async () => {
   const env = setup({ routing: { useBuiltin: true, replanPhrases: [], executePhrases: [], planRequired: ['## 步骤'] } })
   const ctx = env.ctxFor(join(env.agent, 'sessions', 'r3.jsonl'))

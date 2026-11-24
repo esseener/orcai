@@ -42,19 +42,7 @@ type AcceptanceCfg = {
   autoReview: boolean; autoRework: boolean; maxRework: number; autoRoute: boolean
   planner: string | null; executor: string | null; routing: RoutingRules
 }
-const PRESET_REPLAN = [
-  '重新规划', '重新计划', '重新评估',
-  '审查一下', '评估一下', '分析一下', '复盘一下', '拆解一下',
-  '先做计划', '先写计划', '先给方案', '换个方案', '换一个方案', '换个思路',
-  '不要直接执行', '不要开始执行', '不要开始实现', '不要继续执行', '不要执行', '先别执行',
-]
-const PRESET_EXECUTE = [
-  '开始实现', '开始执行', '继续实现', '继续执行',
-  '按计划执行', '按计划实现', '执行计划', '接着做', '动手吧', '开干', '开工',
-  '开始做', '继续推进', '直接实现', '直接执行',
-  'start implementing', 'implement it', 'go ahead', 'proceed', 'continue',
-]
-const DEFAULT_ROUTING: RoutingRules = { useBuiltin: true, presetVersion: 1, replanPhrases: PRESET_REPLAN, executePhrases: PRESET_EXECUTE, planRequired: [] }
+const DEFAULT_ROUTING: RoutingRules = { useBuiltin: true, presetVersion: 0, replanPhrases: [], executePhrases: [], planRequired: [] }
 const cleanRules = (value: unknown, limit: number): string[] => {
   if (!Array.isArray(value)) return []
   const seen = new Set<string>()
@@ -77,8 +65,10 @@ const normalizeRouting = (value: unknown): RoutingRules => {
     (Array.isArray(row.executePhrases) && row.executePhrases.length) ||
     (Array.isArray(row.planRequired) && row.planRequired.length)
   ))
+  // Pre-0.2.4 empty configs are indistinguishable from an explicit empty save.
+  // Keep them empty; the panel offers starter rules as an unsaved draft.
   if (!row || (!hasMarker && !hasCustom && row.useBuiltin !== false)) {
-    return { useBuiltin: true, presetVersion: 1, replanPhrases: [...PRESET_REPLAN], executePhrases: [...PRESET_EXECUTE], planRequired: [] }
+    return { useBuiltin: true, presetVersion: 0, replanPhrases: [], executePhrases: [], planRequired: [] }
   }
   return {
     useBuiltin: row.useBuiltin !== false,
@@ -257,18 +247,18 @@ export default function (pi: Pi): void {
   // acks, or an execution verb without an explicit re-plan request. The old
   // whole-sentence regex sent "开始执行吧。" and "直接执行 我授权了" back to the
   // planner, which then could not touch code and looked like a permission bug.
-  const ackOnly = /^(?:继续(?:执行|实现)?|按计划(?:执行|实现)?|开始(?:执行|实现)?|执行计划|好(?:的)?|可以|行|ok|continue|proceed)[。！!.\s]*$/i
-  const executionIntent = /(继续(?:执行|实现|做|干|推进)?|开始(?:执行|实现|实施|做|干)?|执行(?:下去|计划|吧|起来)?|按计划|动手|开干|开工|实施|落地|授权|直接做|直接执行|go\s*ahead|proceed|continue|do\s*it)/i
+  const ackOnly = /^(?:继续(?:执行|实现)?|按计划(?:执行|实现)?|开始(?:执行|实现|吧)?|执行计划|好(?:的)?|可以|行|ok|continue|proceed)[。！!.\s]*$/i
+  const executionIntent = /(继续(?:执行|实现|做|干|推进)?|开始(?:执行|实现|实施|做|干)|执行(?:下去|计划|吧|起来)?|按计划|动手|开干|开工|实施|落地|授权|直接做|直接执行|go\s*ahead|proceed|continue|do\s*it)/i
   const replanIntent = /(重新(?:规划|计划|审查|评估|分析|设计)|(?:做|写|出|列|改|调整|更新)(?:个|一个|一下)?(?:计划|方案)|规划一下|计划一下|审查|评估|分析|复盘|拆解一下)/i
   const hasRule = (text: string, phrases: string[]): boolean => phrases.some((phrase) => text.includes(phrase.toLowerCase()))
   const wantsExecution = (text: string, rules: RoutingRules = DEFAULT_ROUTING): boolean => {
     const lower = text.toLowerCase()
-    // A re-plan rule wins when a message names both, so custom rules can
-    // always pull an execution session back to the planner.
+    // Re-planning wins over both custom and built-in execution phrases.
     if (hasRule(lower, rules.replanPhrases)) return false
+    if (rules.useBuiltin && replanIntent.test(text)) return false
     if (hasRule(lower, rules.executePhrases)) return true
     if (!rules.useBuiltin) return false
-    return ackOnly.test(text) || (executionIntent.test(text) && !replanIntent.test(text))
+    return ackOnly.test(text) || executionIntent.test(text)
   }
   const missingPlanRequirements = (content: string, rules: RoutingRules): string[] => {
     const lower = content.toLowerCase()

@@ -10,6 +10,7 @@ import { acceptanceResult, acceptanceReview, acceptanceStop } from './acceptance
 import { createModelCatalog, MODELS_TIMEOUT_MS, parseModelRows } from './orzic-models.mjs'
 import { hostActive, isRecent, sessionIdFromFile } from './orzic-session-state.mjs'
 import { normalizeRoutingRules } from './orzic-routing.mjs'
+import { DEFAULT_ACCEPTANCE_CRITERIA } from './orzic-acceptance-default.mjs'
 
 // Ship the in-session acceptance loop and detached review driver to OMP's
 // extension directory. Model routing remains owned by OMP's native prewalk.
@@ -28,7 +29,7 @@ function installLoopExtension(): void {
     if (!existsSync(dst) || readFileSync(dst, 'utf8') !== src) writeFileSync(dst, src, 'utf8')
     // 外部 loop driver(agent_end detached spawn):评审+REWORK 注入在 OMP 外跑,不挂死。
     // driver 依赖 orzic-verdict/orzic-lock/orzic-session/orzic-repokey 四个模块,一起同步。
-    for (const mod of ['orzic-driver.mjs', 'orzic-verdict.mjs', 'orzic-lock.mjs', 'orzic-session.mjs', 'orzic-repokey.mjs']) {
+    for (const mod of ['orzic-driver.mjs', 'orzic-verdict.mjs', 'orzic-lock.mjs', 'orzic-session.mjs', 'orzic-repokey.mjs', 'orzic-acceptance-default.mjs']) {
       const modSrc = readFileSync(join(here, mod), 'utf8')
       const modDst = join(dir, mod)
       if (!existsSync(modDst) || readFileSync(modDst, 'utf8') !== modSrc) writeFileSync(modDst, modSrc, 'utf8')
@@ -150,8 +151,8 @@ async function status(orca: OrcaWorkerApi): Promise<{ models: OmpModel[]; fusion
   const intoValue = typeof rv.default === 'string' && rv.default ? rv.default : legacyInto
   const sf = split(fromValue), si = split(intoValue)
   const am = split(typeof rv.advisor === 'string' ? rv.advisor : null)
-  const ac: AcceptanceCfg = { ocr: acc?.ocr === true, ocrModel: acc?.ocrModel ?? 'gpt-6.2-sol', ocrEffort: acc?.ocrEffort ?? 'high', rulePath: acc?.rulePath ?? '.opencodereview/rule.json', checkCmd: acc?.checkCmd ?? null, autoReview: acc?.autoReview === true, autoRework: acc?.autoRework === true, maxRework: typeof acc?.maxRework === 'number' && acc.maxRework > 0 ? acc.maxRework : 3, autoRoute: acc?.autoRoute === true, planner: typeof acc?.planner === 'string' ? acc.planner : null, executor: typeof acc?.executor === 'string' ? acc.executor : null, routing: normalizeRoutingRules(acc?.routing) }
-  return { models: modelSnapshot, fusion: { enabled: planEnabled === true, from: sf.model, fromEffort: sf.effort, into: si.model, intoEffort: si.effort, taskPrewalk: taskPrewalk === true, advisor: advisor === true, advisorModel: am.model, advisorEffort: am.effort, ocr: ac.ocr, ocrModel: ac.ocrModel, ocrEffort: ac.ocrEffort, rulePath: ac.rulePath, checkCmd: ac.checkCmd, autoReview: ac.autoReview, autoRework: ac.autoRework, maxRework: ac.maxRework, routing: ac.routing } }
+  const ac: AcceptanceCfg = { ocr: acc?.ocr === true, ocrModel: acc?.ocrModel ?? 'gpt-6.2-sol', ocrEffort: acc?.ocrEffort ?? 'high', rulePath: acc?.rulePath ?? '.opencodereview/rule.json', checkCmd: acc?.checkCmd ?? null, autoReview: acc?.autoReview === true, autoRework: acc?.autoRework === true, maxRework: typeof acc?.maxRework === 'number' && acc.maxRework > 0 ? acc.maxRework : 3, autoRoute: acc?.autoRoute === true, planner: typeof acc?.planner === 'string' ? acc.planner : null, executor: typeof acc?.executor === 'string' ? acc.executor : null, criteria: typeof acc?.criteria === 'string' ? acc.criteria : DEFAULT_ACCEPTANCE_CRITERIA, routing: normalizeRoutingRules(acc?.routing) }
+  return { models: modelSnapshot, fusion: { enabled: planEnabled === true, from: sf.model, fromEffort: sf.effort, into: si.model, intoEffort: si.effort, taskPrewalk: taskPrewalk === true, advisor: advisor === true, advisorModel: am.model, advisorEffort: am.effort, ocr: ac.ocr, ocrModel: ac.ocrModel, ocrEffort: ac.ocrEffort, rulePath: ac.rulePath, checkCmd: ac.checkCmd, autoReview: ac.autoReview, autoRework: ac.autoRework, maxRework: ac.maxRework, criteria: ac.criteria, routing: ac.routing } }
 }
 
 export default function activate(orca: OrcaWorkerApi): void {
@@ -169,7 +170,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.panels.handle('acceptance.review', async (input) => acceptanceReview(orca, input as { repo?: string; commit?: string; from?: string; to?: string }))
   orca.panels.handle('acceptance.result', async (input) => acceptanceResult(input as { repo?: string }))
   orca.panels.handle('acceptance.stop', async (input) => acceptanceStop(input as { repo?: string; force?: boolean }))
-  orca.panels.handle('fusion.set', async ({ enabled, from, fromEffort, into, intoEffort, taskPrewalk, advisor, advisorModel, advisorEffort, ocr, ocrModel, ocrEffort, rulePath, checkCmd, autoReview, autoRework, maxRework, routing }) => {
+  orca.panels.handle('fusion.set', async ({ enabled, from, fromEffort, into, intoEffort, taskPrewalk, advisor, advisorModel, advisorEffort, ocr, ocrModel, ocrEffort, rulePath, checkCmd, autoReview, autoRework, maxRework, criteria, routing }) => {
     const current = (await status(orca)).fusion
     const next = {
       enabled: typeof enabled === 'boolean' ? enabled : current.enabled,
@@ -186,6 +187,7 @@ export default function activate(orca: OrcaWorkerApi): void {
       autoReview: typeof autoReview === 'boolean' ? autoReview : current.autoReview,
       autoRework: typeof autoRework === 'boolean' ? autoRework : current.autoRework,
       maxRework: typeof maxRework === 'number' && maxRework > 0 ? maxRework : current.maxRework,
+      criteria: typeof criteria === 'string' ? criteria : current.criteria,
       routing: normalizeRoutingRules(routing ?? current.routing)
     }
     // 规划模型=新对话默认+restart;验收模型=modelRoles.advisor(独立第三模型)
@@ -193,7 +195,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     if (next.into) roles.default = next.into
     if (next.from) roles.plan = next.from
     if (next.advisorModel) roles.advisor = next.advisorModel
-    const acceptance: AcceptanceCfg = { ocr: next.ocr, ocrModel: next.ocrModel, ocrEffort: next.ocrEffort, rulePath: next.rulePath, checkCmd: next.checkCmd, autoReview: next.autoReview, autoRework: next.autoRework, maxRework: next.maxRework, autoRoute: next.enabled, planner: next.from, executor: next.into, routing: next.routing }
+    const acceptance: AcceptanceCfg = { ocr: next.ocr, ocrModel: next.ocrModel, ocrEffort: next.ocrEffort, rulePath: next.rulePath, checkCmd: next.checkCmd, autoReview: next.autoReview, autoRework: next.autoRework, maxRework: next.maxRework, autoRoute: next.enabled, planner: next.from, executor: next.into, criteria: next.criteria, routing: next.routing }
     await Promise.all([
       ompConfigSet('plan.enabled', next.enabled),
       ompConfigSet('prewalk.enabled', false),
@@ -204,7 +206,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     ])
     configCache = null
     const sf = split(next.from), si = split(next.into), sa = split(next.advisorModel)
-    return { enabled: next.enabled, from: sf.model, fromEffort: sf.effort, into: si.model, intoEffort: si.effort, taskPrewalk: next.taskPrewalk, advisor: next.advisor, advisorModel: sa.model, advisorEffort: sa.effort, ocr: next.ocr, ocrModel: next.ocrModel, ocrEffort: next.ocrEffort, rulePath: next.rulePath, checkCmd: next.checkCmd, autoReview: next.autoReview, autoRework: next.autoRework, maxRework: next.maxRework, routing: next.routing }
+    return { enabled: next.enabled, from: sf.model, fromEffort: sf.effort, into: si.model, intoEffort: si.effort, taskPrewalk: next.taskPrewalk, advisor: next.advisor, advisorModel: sa.model, advisorEffort: sa.effort, ocr: next.ocr, ocrModel: next.ocrModel, ocrEffort: next.ocrEffort, rulePath: next.rulePath, checkCmd: next.checkCmd, autoReview: next.autoReview, autoRework: next.autoRework, maxRework: next.maxRework, criteria: next.criteria, routing: next.routing }
   })
 }
 // Live session: newest session .jsonl, model/thinking switch timeline + last tool.

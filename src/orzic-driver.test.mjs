@@ -303,6 +303,30 @@ test('driver: force kill with a detached grandchild in flight → the WHOLE tree
   assert.equal(alive(gpid), false, `grandchild pid ${gpid} must be dead, not just the driver`)
 })
 
+test('driver: plan base reviews every commit since approval, not just HEAD', () => {
+  const agent = mkAgent()
+  const repo = mkRepo()
+  const base = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo }).toString().trim()
+  writeFileSync(join(repo, 'runtime.ts'), 'export const runtime = 1\n')
+  execFileSync('git', ['add', '-A'], { cwd: repo, stdio: 'pipe' })
+  execFileSync('git', ['commit', '-qm', 'runtime'], { cwd: repo, stdio: 'pipe' })
+  writeFileSync(join(repo, 'README.md'), 'docs\n')
+  execFileSync('git', ['add', '-A'], { cwd: repo, stdio: 'pipe' })
+  execFileSync('git', ['commit', '-qm', 'docs'], { cwd: repo, stdio: 'pipe' })
+  const root = join(agent, 'sessions')
+  const exact = mkSession(root, repo, '2026-01-01_a.jsonl')
+  writeFileSync(join(agent, 'orzic-acceptance.json'), JSON.stringify({ autoReview: true, autoRework: false, maxRework: 3 }))
+  writeFileSync(join(agent, `orzic-plan-${keyOf(repo)}.json`), JSON.stringify({
+    approved: true, sessionFile: exact, planContent: '# plan', digest: 'd1', baseRevision: base,
+  }))
+  const r = runDriver({ ORZIC_AGENT_DIR: agent, ORZIC_CWD: repo, ORZIC_SESSION_FILE: exact, ORZIC_OMP_BIN: NODE, ORZIC_OMP_PREARGS: JSON.stringify([STUB]), ORZIC_STUB_MODE: 'pass' })
+  assert.equal(r.status, 0, r.stderr)
+  const calls = readFileSync(join(agent, 'orzic-stub-calls.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).args)
+  const prompt = calls.flat().find((a) => typeof a === 'string' && a.includes('diff:')) ?? ''
+  assert.match(prompt, /runtime\.ts/, 'diff from the plan base must include the runtime commit')
+  assert.match(prompt, /README\.md/, 'diff from the plan base must include the docs commit too')
+})
+
 test('driver: second instance exits immediately when lock held', () => {
   const agent = mkAgent(); const repo = mkRepo()
   const holder = acquireLock(join(agent, `orzic-driver-${keyOf(repo)}.lock`))
@@ -500,6 +524,17 @@ test('driver: passing checkCmd proceeds to the judge', () => {
   assert.equal(reviewOf(agent, repo).verdict, 'pass')
   const calls = readFileSync(join(agent, 'orzic-stub-calls.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).args)
   assert.equal(calls.filter((a) => a[0] === '--model').length, 1, 'passing check → judge runs once')
+})
+
+test('driver: acceptance criteria are included in the judge prompt', () => {
+  const agent = mkAgent(); const repo = mkRepo()
+  writeFileSync(join(agent, 'orzic-acceptance.json'), JSON.stringify({ autoReview: true, autoRework: false, maxRework: 3, criteria: '不得新增运行时依赖。' }))
+  const r = runDriver({ ORZIC_AGENT_DIR: agent, ORZIC_CWD: repo, ORZIC_OMP_BIN: NODE, ORZIC_OMP_PREARGS: JSON.stringify([STUB]), ORZIC_STUB_MODE: 'pass' })
+  assert.equal(r.status, 0)
+  const calls = readFileSync(join(agent, 'orzic-stub-calls.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).args)
+  const judge = calls.find((a) => a[0] === '--model')
+  assert.ok(judge, 'judge must run')
+  assert.match(String(judge.at(-1)), /验收标准\(逐条核对,不满足即 finding\):\n不得新增运行时依赖。/)
 })
 
 test('driver: a newly configured failing gate is NOT bypassed by an old PASS on unchanged HEAD', () => {
