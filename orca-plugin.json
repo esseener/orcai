@@ -3,7 +3,7 @@
   "id": "orcai",
   "publisher": "esseener",
   "name": "Orcai",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Orca sidebar for OMP: plan/execute model routing, live agent sessions, and out-of-session acceptance review.",
   "author": {
     "name": "esseener",
@@ -13,7 +13,7 @@
   "homepage": "https://github.com/esseener/orcai",
   "license": "MIT",
   "engines": {
-    "orca": ">=1.4.271"
+    "orca": ">=1.4.268"
   },
   "execution": "trusted-worker",
   "pluginApi": 1,
@@ -21,7 +21,7 @@
   "contributes": {
     "panels": [
       {
-        "id": "orcai",
+        "id": "orzic",
         "title": "Orcai",
         "icon": "blocks",
         "entry": "src/panel.tsx",

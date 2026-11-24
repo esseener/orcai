@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 — 2026-11-24
+
+- 恢复面板 id `orzic`，`--panel orzic` 的脚本继续有效；公开插件身份仍为 `esseener.orcai`。
+- 最低 Orca 版本恢复为 `>=1.4.268`：`agents.list` 的 `workspaceId` 属于 host API 1.10，对应 Orca 1.4.260，1.4.268 已覆盖。
+- README 增加 `local.orzic → local.orcai` 的升级步骤；说明设置与便签不跨身份迁移。
+- 明确活跃优先排序是有意行为：状态或最近活动变化时行会移动；新增 [docs/VERIFICATION.md](docs/VERIFICATION.md) 记录会话行为、测试与发布验证。
+
 ## 0.2.0 — 2026-11-24
 
 - 公开发布：插件身份为 `esseener.orcai`，仓库 `https://github.com/esseener/orcai`，与已有的 `esseener/orzic`（Team Flow）分开。
