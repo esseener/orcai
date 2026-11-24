@@ -3,7 +3,7 @@
 // Every new request starts on the planner; planning blocks bash and all writes
 // except PLAN.md. Only an explicit continuation after a successful PLAN.md
 // handoff stays on the executor. `agent_end` still starts external review.
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -30,10 +30,40 @@ type Pi = {
   setThinkingLevel?(level: string): unknown
   sendUserMessage?(text: string): unknown
 }
+type RoutingRules = {
+  useBuiltin: boolean
+  replanPhrases: string[]
+  executePhrases: string[]
+  planRequired: string[]
+}
 type AcceptanceCfg = {
   ocr: boolean; ocrModel: string | null; ocrEffort: string | null; rulePath: string | null
   autoReview: boolean; autoRework: boolean; maxRework: number; autoRoute: boolean
-  planner: string | null; executor: string | null
+  planner: string | null; executor: string | null; routing: RoutingRules
+}
+const DEFAULT_ROUTING: RoutingRules = { useBuiltin: true, replanPhrases: [], executePhrases: [], planRequired: [] }
+const cleanRules = (value: unknown, limit: number): string[] => {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of value) {
+    const phrase = String(raw ?? '').trim().slice(0, 80)
+    const key = phrase.toLowerCase()
+    if (!phrase || seen.has(key)) continue
+    seen.add(key)
+    out.push(phrase)
+    if (out.length >= limit) break
+  }
+  return out
+}
+const normalizeRouting = (value: unknown): RoutingRules => {
+  const row = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  return {
+    useBuiltin: row.useBuiltin !== false,
+    replanPhrases: cleanRules(row.replanPhrases, 20),
+    executePhrases: cleanRules(row.executePhrases, 20),
+    planRequired: cleanRules(row.planRequired, 10),
+  }
 }
 
 const agentRoot = (): string => process.env.ORZIC_AGENT_DIR || join(homedir(), '.omp', 'agent')
@@ -71,9 +101,10 @@ const readCfg = (): AcceptanceCfg => {
       autoRoute: d.autoRoute === true,
       planner: typeof d.planner === 'string' && d.planner ? d.planner : null,
       executor: typeof d.executor === 'string' && d.executor ? d.executor : null,
+      routing: normalizeRouting(d.routing),
     }
   } catch {
-    return { ocr: false, ocrModel: null, ocrEffort: null, rulePath: null, autoReview: false, autoRework: false, maxRework: 3, autoRoute: false, planner: null, executor: null }
+    return { ocr: false, ocrModel: null, ocrEffort: null, rulePath: null, autoReview: false, autoRework: false, maxRework: 3, autoRoute: false, planner: null, executor: null, routing: DEFAULT_ROUTING }
   }
 }
 
@@ -206,13 +237,43 @@ export default function (pi: Pi): void {
   const ackOnly = /^(?:继续(?:执行|实现)?|按计划(?:执行|实现)?|开始(?:执行|实现)?|执行计划|好(?:的)?|可以|行|ok|continue|proceed)[。！!.\s]*$/i
   const executionIntent = /(继续(?:执行|实现|做|干|推进)?|开始(?:执行|实现|实施|做|干)?|执行(?:下去|计划|吧|起来)?|按计划|动手|开干|开工|实施|落地|授权|直接做|直接执行|go\s*ahead|proceed|continue|do\s*it)/i
   const replanIntent = /(重新(?:规划|计划|审查|评估|分析|设计)|(?:做|写|出|列|改|调整|更新)(?:个|一个|一下)?(?:计划|方案)|规划一下|计划一下|审查|评估|分析|复盘|拆解一下)/i
-  const wantsExecution = (text: string): boolean =>
-    ackOnly.test(text) || (executionIntent.test(text) && !replanIntent.test(text))
+  const hasRule = (text: string, phrases: string[]): boolean => phrases.some((phrase) => text.includes(phrase.toLowerCase()))
+  const wantsExecution = (text: string, rules: RoutingRules = DEFAULT_ROUTING): boolean => {
+    const lower = text.toLowerCase()
+    // A re-plan rule wins when a message names both, so custom rules can
+    // always pull an execution session back to the planner.
+    if (hasRule(lower, rules.replanPhrases)) return false
+    if (hasRule(lower, rules.executePhrases)) return true
+    if (!rules.useBuiltin) return false
+    return ackOnly.test(text) || (executionIntent.test(text) && !replanIntent.test(text))
+  }
+  const missingPlanRequirements = (content: string, rules: RoutingRules): string[] => {
+    const lower = content.toLowerCase()
+    return rules.planRequired.filter((phrase) => !lower.includes(phrase.toLowerCase()))
+  }
   const isPlanTarget = (target: string): boolean => /(?:^|[\\/:])PLAN\.md$/i.test(target)
+  // The executor is the established model for implementation. Task items that
+  // do not name a model inherit the parent's transient model otherwise.
+  const withTaskModel = (input: Record<string, unknown>, model: string): Record<string, unknown> | null => {
+    if (Array.isArray(input.tasks)) {
+      let changed = false
+      const tasks = input.tasks.map((task) => {
+        if (!task || typeof task !== 'object' || 'model' in task) return task
+        changed = true
+        return { ...(task as Record<string, unknown>), model }
+      })
+      return changed ? { ...input, tasks } : null
+    }
+    if (typeof input.task === 'string' && !('model' in input)) return { ...input, model }
+    return null
+  }
   const planFilePath = (cwd: string, target: string): string =>
     /^local:\/\//i.test(target) ? target : isAbsolute(target) ? target : join(cwd, target)
 
   const planPath = (key: string): string => join(agentRoot(), `orzic-plan-${key}.json`)
+  const headOf = (cwd: string): string => {
+    try { return execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim() } catch { return '' }
+  }
   const writePlan = (ctx: PiCtx, content: string): boolean => {
     const text = String(content ?? '')
     if (!text.trim()) return false
@@ -223,6 +284,7 @@ export default function (pi: Pi): void {
         choice: 'auto',
         by: 'extension',
         sessionFile: pinSession(ctx) || null,
+        baseRevision: headOf(ctx.cwd) || null,
         planContent: text.slice(0, 200000),
         digest: createHash('sha256').update(text).digest('hex'),
         at: new Date().toISOString(),
@@ -267,7 +329,7 @@ export default function (pi: Pi): void {
     }
     turnBySession.set(f, ++turnSeq)
     hydrate(f)
-    const resume = executing.has(f) && wantsExecution(e.prompt.trim())
+    const resume = executing.has(f) && wantsExecution(e.prompt.trim(), cfg.routing)
     if (resume) {
       const ok = await useModel(ctx, cfg.executor)
       boot(`route session=${f} phase=executing selector=${cfg.executor} ok=${ok}`)
@@ -330,6 +392,11 @@ export default function (pi: Pi): void {
         const delegated = name === 'task'
         pendingWrites.set(e.toolCallId, { session: f, turn, isPlan: !shell && MUTATING.has(name) && isPlanTarget(target), shell, delegated })
       }
+      if (name === 'task' && f && executing.has(f)) {
+        const executor = readCfg().executor
+        const patched = executor ? withTaskModel(input, executor) : null
+        if (patched) return { input: patched }
+      }
       return
     }
     // A task spawn runs in its own session, so the read-only gate here cannot
@@ -380,6 +447,12 @@ export default function (pi: Pi): void {
     }
     if (!content || !content.trim()) {
       ctx.ui?.notify?.('Orzic: PLAN.md 为空或读不到，保持规划阶段。', 'warning')
+      return
+    }
+    const missing = missingPlanRequirements(content, readCfg().routing)
+    if (missing.length) {
+      ctx.ui?.notify?.(`Orzic: 计划缺少必含内容：${missing.join('、')}`, 'warning')
+      boot(`plan content rejected missing=${missing.join(',')} session=${f}`)
       return
     }
     if (!writePlan(ctx, content)) {

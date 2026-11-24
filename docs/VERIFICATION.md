@@ -18,10 +18,31 @@ Related regression coverage:
 
 - `orzic-session-state.test.mjs` — session id comes from the JSONL suffix; two sessions in the same project keep distinct ids; a status event only changes the matching id; 20-minute boundary; working-beyond-window visibility; active/inactive sorting and tie-break; late snapshot override release.
 - `panel.test.tsx` — persisted/visible session rows use their own models; active-but-old rows stay visible; old idle rows do not; planning renders as `规划`, not `主脑`; a `working → done` event updates only that row; a host read failure is shown without hiding recent rows.
-- `npm test` → 126 tests, 125 passed, 1 skipped.
+- `npm test` → 139 tests, 138 passed, 1 skipped.
 - `npm run typecheck` → passed.
 - `orca plugin check .` → panel rendered with no issues or warnings.
 - `orca plugin validate .` → `esseener.orcai` 0.2.2 valid, no errors.
+
+## Routing rules
+
+The editable switch rules live in the same `orzic-acceptance.json` as the route models:
+
+| Field | Behavior |
+|---|---|
+| `routing.useBuiltin` | When false, only the custom phrase lists participate |
+| `routing.replanPhrases` | Literal, case-insensitive; a match returns the next execution-phase message to the planner and wins over an execute phrase |
+| `routing.executePhrases` | Literal, case-insensitive; keeps an already handed-off session on the executor |
+| `routing.planRequired` | Literal, case-insensitive; every entry must appear in `PLAN.md` before the handoff |
+
+New tasks still start on the planner, and a custom execute phrase cannot bypass `PLAN.md`. The extension reads the file on each message, so a panel save applies to the next message without an OMP restart.
+
+Coverage:
+
+- `orzic-routing.test.mjs` — defaults, normalization and limits, custom re-plan priority, built-in off, custom execute, and plan-required matching.
+- `orzic-loop.test.mjs` — custom execute cannot skip planning; custom execute keeps a handed-off session on the executor; custom re-plan wins; missing `PLAN.md` markers block handoff; editing the rule file applies without reload.
+- `panel.test.tsx` — rules save with normalized values; cancel writes nothing; a rejected save shows the error.
+
+`npm test` → 139 tests, 138 passed, 1 skipped; `npm run typecheck` → passed.
 
 ## Ordering decision
 
@@ -31,8 +52,15 @@ The active-first ordering is intentional. The earlier prototype kept every row i
 
 - Plugin id is `orcai`; the existing `esseener/orzic` repository is a different Team Flow plugin and already owns the `orzic` id.
 - Panel id remains `orzic`, so `--panel orzic` keeps working for existing scripts.
-- Minimum Orca is `>=1.4.271`, the version used to load the panel and receive `agent.status.changed` during this release check. Lower versions were not verified for this release.
+- Minimum Orca is `>=1.4.268`: the `agents.list` `workspaceId` parameter belongs to host API 1.10 (Orca 1.4.260), so 1.4.268 includes it.
 - Upgrade path: unload the old development key `local.orzic`, load the new `esseener.orcai`, and copy any notes first because plugin storage is not migrated across identities.
+
+## Editable routing (0.2.2)
+
+- `orzic-routing.test.mjs` covers literal phrase normalization/deduplication, custom execution and re-plan phrases, re-plan precedence, and case-insensitive `PLAN.md` requirements.
+- `orzic-loop.test.mjs` covers a custom execution phrase, custom re-plan precedence, a rejected plan missing required content, and changing the rule file before the next prompt without reloading.
+- `panel.test.tsx` covers opening the editor, saving phrases through `fusion.set`, cancelling without writing, and showing a failed save; 139 tests, 138 passed, 1 skipped.
+- Active-first ordering is a later product request and intentionally moves rows when host state or recency changes; the README documents this behavior.
 
 ## Published artifact
 

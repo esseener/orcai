@@ -9,6 +9,7 @@ import { commandError, ompExecutable } from './cli'
 import { acceptanceResult, acceptanceReview, acceptanceStop } from './acceptance'
 import { createModelCatalog, MODELS_TIMEOUT_MS, parseModelRows } from './orzic-models.mjs'
 import { hostActive, isRecent, sessionIdFromFile } from './orzic-session-state.mjs'
+import { normalizeRoutingRules } from './orzic-routing.mjs'
 
 // Ship the in-session acceptance loop and detached review driver to OMP's
 // extension directory. Model routing remains owned by OMP's native prewalk.
@@ -149,8 +150,8 @@ async function status(orca: OrcaWorkerApi): Promise<{ models: OmpModel[]; fusion
   const intoValue = typeof rv.default === 'string' && rv.default ? rv.default : legacyInto
   const sf = split(fromValue), si = split(intoValue)
   const am = split(typeof rv.advisor === 'string' ? rv.advisor : null)
-  const ac: AcceptanceCfg = { ocr: acc?.ocr === true, ocrModel: acc?.ocrModel ?? 'gpt-6.2-sol', ocrEffort: acc?.ocrEffort ?? 'high', rulePath: acc?.rulePath ?? '.opencodereview/rule.json', checkCmd: acc?.checkCmd ?? null, autoReview: acc?.autoReview === true, autoRework: acc?.autoRework === true, maxRework: typeof acc?.maxRework === 'number' && acc.maxRework > 0 ? acc.maxRework : 3, autoRoute: acc?.autoRoute === true, planner: typeof acc?.planner === 'string' ? acc.planner : null, executor: typeof acc?.executor === 'string' ? acc.executor : null }
-  return { models: modelSnapshot, fusion: { enabled: planEnabled === true, from: sf.model, fromEffort: sf.effort, into: si.model, intoEffort: si.effort, taskPrewalk: taskPrewalk === true, advisor: advisor === true, advisorModel: am.model, advisorEffort: am.effort, ocr: ac.ocr, ocrModel: ac.ocrModel, ocrEffort: ac.ocrEffort, rulePath: ac.rulePath, checkCmd: ac.checkCmd, autoReview: ac.autoReview, autoRework: ac.autoRework, maxRework: ac.maxRework } }
+  const ac: AcceptanceCfg = { ocr: acc?.ocr === true, ocrModel: acc?.ocrModel ?? 'gpt-6.2-sol', ocrEffort: acc?.ocrEffort ?? 'high', rulePath: acc?.rulePath ?? '.opencodereview/rule.json', checkCmd: acc?.checkCmd ?? null, autoReview: acc?.autoReview === true, autoRework: acc?.autoRework === true, maxRework: typeof acc?.maxRework === 'number' && acc.maxRework > 0 ? acc.maxRework : 3, autoRoute: acc?.autoRoute === true, planner: typeof acc?.planner === 'string' ? acc.planner : null, executor: typeof acc?.executor === 'string' ? acc.executor : null, routing: normalizeRoutingRules(acc?.routing) }
+  return { models: modelSnapshot, fusion: { enabled: planEnabled === true, from: sf.model, fromEffort: sf.effort, into: si.model, intoEffort: si.effort, taskPrewalk: taskPrewalk === true, advisor: advisor === true, advisorModel: am.model, advisorEffort: am.effort, ocr: ac.ocr, ocrModel: ac.ocrModel, ocrEffort: ac.ocrEffort, rulePath: ac.rulePath, checkCmd: ac.checkCmd, autoReview: ac.autoReview, autoRework: ac.autoRework, maxRework: ac.maxRework, routing: ac.routing } }
 }
 
 export default function activate(orca: OrcaWorkerApi): void {
@@ -168,7 +169,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.panels.handle('acceptance.review', async (input) => acceptanceReview(orca, input as { repo?: string; commit?: string; from?: string; to?: string }))
   orca.panels.handle('acceptance.result', async (input) => acceptanceResult(input as { repo?: string }))
   orca.panels.handle('acceptance.stop', async (input) => acceptanceStop(input as { repo?: string; force?: boolean }))
-  orca.panels.handle('fusion.set', async ({ enabled, from, fromEffort, into, intoEffort, taskPrewalk, advisor, advisorModel, advisorEffort, ocr, ocrModel, ocrEffort, rulePath, checkCmd, autoReview, autoRework, maxRework }) => {
+  orca.panels.handle('fusion.set', async ({ enabled, from, fromEffort, into, intoEffort, taskPrewalk, advisor, advisorModel, advisorEffort, ocr, ocrModel, ocrEffort, rulePath, checkCmd, autoReview, autoRework, maxRework, routing }) => {
     const current = (await status(orca)).fusion
     const next = {
       enabled: typeof enabled === 'boolean' ? enabled : current.enabled,
@@ -184,14 +185,15 @@ export default function activate(orca: OrcaWorkerApi): void {
       checkCmd: typeof checkCmd === 'string' ? checkCmd : current.checkCmd,
       autoReview: typeof autoReview === 'boolean' ? autoReview : current.autoReview,
       autoRework: typeof autoRework === 'boolean' ? autoRework : current.autoRework,
-      maxRework: typeof maxRework === 'number' && maxRework > 0 ? maxRework : current.maxRework
+      maxRework: typeof maxRework === 'number' && maxRework > 0 ? maxRework : current.maxRework,
+      routing: normalizeRoutingRules(routing ?? current.routing)
     }
     // 规划模型=新对话默认+restart;验收模型=modelRoles.advisor(独立第三模型)
     const roles: Record<string, unknown> = (await ompCli<{ value?: Record<string, unknown> }>('config', 'get', 'modelRoles'))?.value ?? {}
     if (next.into) roles.default = next.into
     if (next.from) roles.plan = next.from
     if (next.advisorModel) roles.advisor = next.advisorModel
-    const acceptance: AcceptanceCfg = { ocr: next.ocr, ocrModel: next.ocrModel, ocrEffort: next.ocrEffort, rulePath: next.rulePath, checkCmd: next.checkCmd, autoReview: next.autoReview, autoRework: next.autoRework, maxRework: next.maxRework, autoRoute: next.enabled, planner: next.from, executor: next.into }
+    const acceptance: AcceptanceCfg = { ocr: next.ocr, ocrModel: next.ocrModel, ocrEffort: next.ocrEffort, rulePath: next.rulePath, checkCmd: next.checkCmd, autoReview: next.autoReview, autoRework: next.autoRework, maxRework: next.maxRework, autoRoute: next.enabled, planner: next.from, executor: next.into, routing: next.routing }
     await Promise.all([
       ompConfigSet('plan.enabled', next.enabled),
       ompConfigSet('prewalk.enabled', false),
@@ -202,7 +204,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     ])
     configCache = null
     const sf = split(next.from), si = split(next.into), sa = split(next.advisorModel)
-    return { enabled: next.enabled, from: sf.model, fromEffort: sf.effort, into: si.model, intoEffort: si.effort, taskPrewalk: next.taskPrewalk, advisor: next.advisor, advisorModel: sa.model, advisorEffort: sa.effort, ocr: next.ocr, ocrModel: next.ocrModel, ocrEffort: next.ocrEffort, rulePath: next.rulePath, checkCmd: next.checkCmd, autoReview: next.autoReview, autoRework: next.autoRework, maxRework: next.maxRework }
+    return { enabled: next.enabled, from: sf.model, fromEffort: sf.effort, into: si.model, intoEffort: si.effort, taskPrewalk: next.taskPrewalk, advisor: next.advisor, advisorModel: sa.model, advisorEffort: sa.effort, ocr: next.ocr, ocrModel: next.ocrModel, ocrEffort: next.ocrEffort, rulePath: next.rulePath, checkCmd: next.checkCmd, autoReview: next.autoReview, autoRework: next.autoRework, maxRework: next.maxRework, routing: next.routing }
   })
 }
 // Live session: newest session .jsonl, model/thinking switch timeline + last tool.

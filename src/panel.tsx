@@ -1,6 +1,7 @@
 import { atom, Badge, Box, Button, Card, Checkbox, EmptyState, IconButton, Image, Input, KeyValue, on, plugin, read, Row, Separator, set, Stack, Tab, Tabs, Text, Textarea, type PanelContext } from 'orca'
-import type { FusionState, OmpModel, SessionStage, SessionStatus } from './protocol'
+import type { FusionState, OmpModel, RoutingRules, SessionStage, SessionStatus } from './protocol'
 import { filterModelChoices, isFusionModel } from './orzic-models.mjs'
+import { normalizeRoutingRules } from './orzic-routing.mjs'
 import { RECENT_WINDOW_MINUTES, applyHostState, mergeHostOverrides, sessionVisible, sortSessions } from './orzic-session-state.mjs'
 
 const status = atom<{ data?: { models?: OmpModel[]; fusion: FusionState }; error?: string } | null>(null)
@@ -122,6 +123,8 @@ async function stopAcceptance(force: boolean) {
 const busy = atom(false)
 const editing = atom<string | null>(null)
 const draft = atom<Record<string, { model?: string; effort?: string | null; search?: string }>>({})
+const rulesOpen = atom(false)
+const rulesDraft = atom<RoutingRules | null>(null)
 const PLUGIN_VERSION = '0.2.2'
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
@@ -179,7 +182,7 @@ async function fetchModels(signal: AbortSignal, force = false) {
   } finally { fetchingModels = false }
 }
 
-function patch(patch: { enabled?: boolean; from?: string; fromEffort?: string | null; into?: string; intoEffort?: string | null; taskPrewalk?: boolean; advisor?: boolean; advisorModel?: string; advisorEffort?: string | null; ocr?: boolean; ocrModel?: string; ocrEffort?: string | null; rulePath?: string; checkCmd?: string; autoReview?: boolean; autoRework?: boolean; maxRework?: number }) {
+function patch(patch: { enabled?: boolean; from?: string; fromEffort?: string | null; into?: string; intoEffort?: string | null; taskPrewalk?: boolean; advisor?: boolean; advisorModel?: string; advisorEffort?: string | null; ocr?: boolean; ocrModel?: string; ocrEffort?: string | null; rulePath?: string; checkCmd?: string; autoReview?: boolean; autoRework?: boolean; maxRework?: number; routing?: RoutingRules }) {
   const entry = read(status)
   if (!entry?.data || read(busy)) return
   set(busy, true)
@@ -190,6 +193,75 @@ function patch(patch: { enabled?: boolean; from?: string; fromEffort?: string | 
     .catch((error) => { set(draft, {}); if (!signal.aborted) set(status, { data: { ...entry.data, fusion: previous }, error: message(error) }) })
     .finally(() => set(busy, false))
 }
+
+function lines(value: unknown): string[] {
+  return String(value ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+}
+
+function openRules(f: FusionState) {
+  set(rulesDraft, normalizeRoutingRules(f.routing))
+  set(rulesOpen, true)
+}
+
+function closeRules() {
+  set(rulesOpen, false)
+  set(rulesDraft, null)
+}
+
+function saveRules() {
+  const rules = read(rulesDraft)
+  if (!rules) return
+  patch({ routing: normalizeRoutingRules(rules) })
+  closeRules()
+}
+
+function rulesEditor(f: FusionState) {
+  const rules = read(rulesDraft) ?? normalizeRoutingRules(f.routing)
+  const update = (next: Partial<RoutingRules>) => set(rulesDraft, normalizeRoutingRules({ ...rules, ...next }))
+  return (
+    <Box padding="sm" radius="md" background="muted">
+      <Stack gap="sm">
+        <Checkbox
+          label="保留内置识别"
+          description="继续、执行、重新规划等默认短语仍然有效"
+          checked={rules.useBuiltin}
+          disabled={read(busy)}
+          onChange={(checked) => update({ useBuiltin: checked })}
+        />
+        <Textarea
+          label="回到规划的短语"
+          value={rules.replanPhrases.join('\n')}
+          rows={3}
+          placeholder={'每行一条，例如：\n换个方案\n先评估'}
+          onChange={(value) => update({ replanPhrases: lines(value) })}
+        />
+        <Textarea
+          label="继续执行的短语"
+          value={rules.executePhrases.join('\n')}
+          rows={3}
+          placeholder={'每行一条，例如：\n开始实现\n按计划做'}
+          onChange={(value) => update({ executePhrases: lines(value) })}
+        />
+        <Textarea
+          label="PLAN.md 必含内容"
+          value={rules.planRequired.join('\n')}
+          rows={3}
+          placeholder={'每行一条，全部包含才交给执行模型，例如：\n## 步骤\n## 验证'}
+          onChange={(value) => update({ planRequired: lines(value) })}
+        />
+        <Text size="xs" muted>纯文本、包含即匹配，不区分大小写；规划短语优先。保存后下一轮生效。</Text>
+        <Row justify="between" align="center" gap="sm">
+          <Text size="xs" muted>{rules.replanPhrases.length + rules.executePhrases.length + rules.planRequired.length} 条自定义规则</Text>
+          <Row gap="xs" align="center">
+            <Button size="sm" disabled={read(busy)} onPress={saveRules}>保存规则</Button>
+            <Button size="sm" variant="ghost" onPress={closeRules}>取消</Button>
+          </Row>
+        </Row>
+      </Stack>
+    </Box>
+  )
+}
+
 
 let listBusy = false
 let listQueued = false
@@ -531,6 +603,18 @@ function sessionsCard(rows: SessionRow[], listState: SessionListState) {
 									<Stack gap="sm">
 										<Checkbox label="启用规划路由" description="新任务先由规划模型只读规划" checked={f.enabled} disabled={read(busy)} onChange={(checked) => patch({ enabled: checked })} />
 										<Checkbox label="子代理启用 prewalk" description="内置 task 子代理按 OMP prewalk 切执行模型" checked={f.taskPrewalk} disabled={read(busy)} onChange={(checked) => patch({ taskPrewalk: checked })} />
+										<Row justify="between" align="center" gap="sm">
+											<Stack gap="none">
+												<Text size="sm" weight="medium">切换规则</Text>
+												<Text size="xs" muted>
+													{f.routing.useBuiltin ? '内置识别开' : '仅自定义'} · {f.routing.replanPhrases.length} 回规划 · {f.routing.executePhrases.length} 继续 · {f.routing.planRequired.length} 必含
+												</Text>
+											</Stack>
+											<Button size="sm" variant="ghost" disabled={read(busy)} onPress={() => read(rulesOpen) ? closeRules() : openRules(f)}>
+												{read(rulesOpen) ? '收起规则' : '编辑规则'}
+											</Button>
+										</Row>
+										{read(rulesOpen) && rulesEditor(f)}
 									</Stack>
 								</Card>
 							)}

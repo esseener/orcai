@@ -408,6 +408,15 @@ test('plan: selectors with :effort still resolve', async () => {
   assert.deepEqual(env.levels, ['high', 'max'])
 })
 
+test('an execution task spawn gets the configured executor model', async () => {
+  const env = setup()
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'tm.jsonl'))
+  await enterExecution(env, ctx)
+  const out = await env.fire('tool_call', { toolCallId: 'tm-1', toolName: 'task', input: { tasks: [{ task: 'a' }, { task: 'b', model: 'other/x' }] } }, ctx)
+  assert.equal(out.input.tasks[0].model, 'executor/code')
+  assert.equal(out.input.tasks[1].model, 'other/x')
+})
+
 test('an execution task spawn reviews the parent after async work settles', async () => {
   const env = setup()
   const session = join(env.agent, 'sessions', 'task-parent.jsonl')
@@ -492,4 +501,52 @@ test('agent_end: no write means no spawn', async () => {
   await env.fire('agent_start', {}, ctx)
   await env.fire('agent_end', { willContinue: false }, ctx)
   assert.equal(existsSync(join(env.agent, 'spawn.json')), false)
+})
+
+test('routing: a custom execution phrase cannot skip PLAN.md', async () => {
+  const env = setup({ routing: { useBuiltin: false, replanPhrases: [], executePhrases: ['推进吧'], planRequired: [] } })
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'r0.jsonl'))
+  await env.fire('before_agent_start', { prompt: '推进吧' }, ctx)
+  assert.deepEqual(env.setModels, ['planner/plan'])
+  assert.equal(env.plans().length, 0)
+})
+
+test('routing: a custom execution phrase keeps a handed-off session on the executor', async () => {
+  const env = setup({ routing: { useBuiltin: false, replanPhrases: [], executePhrases: ['推进吧'], planRequired: [] } })
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'r1.jsonl'))
+  await enterExecution(env, ctx)
+  await env.fire('before_agent_start', { prompt: '推进吧' }, ctx)
+  assert.deepEqual(env.setModels, ['planner/plan', 'executor/code', 'executor/code'])
+})
+
+test('routing: a custom re-plan phrase wins over the built-in matcher', async () => {
+  const env = setup({ routing: { useBuiltin: true, replanPhrases: ['换个方案'], executePhrases: [], planRequired: [] } })
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'r2.jsonl'))
+  await enterExecution(env, ctx)
+  await env.fire('before_agent_start', { prompt: '继续执行，换个方案' }, ctx)
+  assert.deepEqual(env.setModels, ['planner/plan', 'executor/code', 'planner/plan'])
+})
+
+test('routing: PLAN.md must contain every configured marker before handoff', async () => {
+  const env = setup({ routing: { useBuiltin: true, replanPhrases: [], executePhrases: [], planRequired: ['## 步骤'] } })
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'r3.jsonl'))
+  await env.fire('before_agent_start', { prompt: '做一个计划' }, ctx)
+  await completePlanWrite(env, ctx, { id: 'plan-a', content: '# 只有标题' })
+  assert.deepEqual(env.setModels, ['planner/plan'])
+  assert.equal(env.plans().length, 0)
+  await completePlanWrite(env, ctx, { id: 'plan-b', content: '## 步骤\n1. 调研\n## 验证\n测试' })
+  assert.deepEqual(env.setModels, ['planner/plan', 'executor/code'])
+  assert.equal(env.plans().length, 1)
+})
+
+test('routing: editing the rule file changes the next prompt without a reload', async () => {
+  const env = setup()
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'r4.jsonl'))
+  await enterExecution(env, ctx)
+  const file = join(env.agent, 'orzic-acceptance.json')
+  const cfg = JSON.parse(readFileSync(file, 'utf8'))
+  cfg.routing = { useBuiltin: false, replanPhrases: [], executePhrases: [], planRequired: [] }
+  writeFileSync(file, JSON.stringify(cfg))
+  await env.fire('before_agent_start', { prompt: '继续' }, ctx)
+  assert.deepEqual(env.setModels, ['planner/plan', 'executor/code', 'planner/plan'])
 })

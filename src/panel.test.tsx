@@ -32,10 +32,12 @@ const fusion = {
   taskPrewalk: false, advisor: false, advisorModel: null, advisorEffort: null,
   ocr: false, ocrModel: null, ocrEffort: null, rulePath: null, checkCmd: null,
   autoReview: false, autoRework: false, maxRework: 3,
+  routing: { useBuiltin: true, replanPhrases: [], executePhrases: [], planRequired: [] },
 }
 
 const requests = {
   'fusion.status': { models, fusion },
+  'fusion.set': fusion,
   'models.list': models,
   'session.status': {} as never,
   'session.list': { sessions: [], activeError: null },
@@ -111,6 +113,27 @@ test('Orcai exposes Orzic and 便签 as top-level modules', async () => {
   assert.equal(mounted.find({ text: '规划路由关' }), null)
 })
 
+test('routing rules can be edited and saved from the panel', async () => {
+  mounted = await mount(panel, { host: mockHost({ requests }) })
+  assert.deepEqual(mounted.errors, [])
+  await mounted.press({ text: '编辑规则' })
+  await mounted.type({ label: '回到规划的短语' }, '换个方案\n先评估')
+  await mounted.type({ label: '继续执行的短语' }, '开始实现')
+  await mounted.type({ label: 'PLAN.md 必含内容' }, '## 步骤')
+  await mounted.press({ text: '保存规则' })
+  const writes = (mounted.host.callsOf('plugin.request') as { name: string; input: unknown }[])
+    .filter((call) => call.name === 'fusion.set')
+    .map((call) => call.input)
+  assert.deepEqual(writes, [{
+    routing: {
+      useBuiltin: true,
+      replanPhrases: ['换个方案', '先评估'],
+      executePhrases: ['开始实现'],
+      planRequired: ['## 步骤'],
+    },
+  }])
+})
+
 test('shows recent sessions with their own model and hides old records', async () => {
   const rows = [
     {
@@ -153,7 +176,7 @@ test('shows recent sessions with their own model and hides old records', async (
   // Old records still exist in the list response, but must not be drawn.
   assert.equal(mounted.find({ text: 'Gamma' }), null)
   assert.equal(mounted.find({ text: /model-gamma/ }), null)
-  // One line between each pair of visible session blocks.
+  // One line between each pair of visible session blocks; no extra divider in the routing card.
   assert.equal(mounted.findAll({ type: 'Separator' }).length, 2)
   // The list already carries each model; the panel must not fan out one
   // session.status call per row.
@@ -217,6 +240,38 @@ test('surfaces a live-state read failure without hiding recent sessions', async 
   await mounted.settled()
   assert.ok(mounted.find({ text: /实时活跃状态不可用.*agent:read denied/ }))
   assert.ok(mounted.find({ text: 'Alpha' }))
+})
+
+test('cancelling routing edits leaves the saved rules untouched', async () => {
+  mounted = await mount(panel, { host: mockHost({ requests }) })
+  assert.deepEqual(mounted.errors, [])
+  await mounted.press({ text: '编辑规则' })
+  await mounted.type({ label: '继续执行的短语' }, '不该保存')
+  await mounted.press({ text: '取消' })
+  assert.equal(mounted.find({ label: '继续执行的短语' }), null)
+  const writes = (mounted.host.callsOf('plugin.request') as { name: string; input: unknown }[])
+    .filter((call) => call.name === 'fusion.set')
+  assert.equal(writes.length, 0)
+})
+
+test('a failed routing save is shown instead of silently dropping the rules', async () => {
+  mounted = await mount(panel, {
+    host: mockHost({
+      requests: {
+        ...requests,
+        'fusion.set': (input) => {
+          if (input && typeof input === 'object' && 'routing' in input) throw new Error('rule save failed')
+          return fusion
+        },
+      },
+    }),
+  })
+  assert.deepEqual(mounted.errors, [])
+  await mounted.press({ text: '编辑规则' })
+  await mounted.type({ label: '继续执行的短语' }, '开始实现')
+  await mounted.press({ text: '保存规则' })
+  await mounted.settled()
+  assert.ok(mounted.find({ text: /rule save failed/ }))
 })
 
 test('the selected thinking level is highlighted, not a gray ghost', async () => {
