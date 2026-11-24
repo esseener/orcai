@@ -111,15 +111,19 @@ test('Orcai exposes Orzic and 便签 as top-level modules', async () => {
   assert.equal(mounted.find({ text: '规划路由关' }), null)
 })
 
-test('shows every session with its own model and separates the rows', async () => {
+test('shows recent sessions with their own model and hides old records', async () => {
   const rows = [
     {
-      file: 'C:\\sessions\\alpha.jsonl', dir: 'sessions', ageMs: 1_000, active: true, title: 'Alpha', cwd: 'C:\\work\\alpha',
+      file: 'C:\\sessions\\alpha.jsonl', dir: 'sessions', ageMs: 1_000, active: true, recent: true, title: 'Alpha', cwd: 'C:\\work\\alpha',
       model: 'model-alpha', thinking: 'high', stage: 'executing' as const, lastTool: 'edit', lastToolAt: '2026-11-24T05:00:00.000Z',
     },
     {
-      file: 'C:\\sessions\\beta.jsonl', dir: 'sessions', ageMs: 2_000, active: false, title: 'Beta', cwd: 'C:\\work\\beta',
+      file: 'C:\\sessions\\beta.jsonl', dir: 'sessions', ageMs: 2_000, active: false, recent: true, title: 'Beta', cwd: 'C:\\work\\beta',
       model: 'model-beta', thinking: null, stage: 'planning' as const, lastTool: null, lastToolAt: null,
+    },
+    {
+      file: 'C:\\sessions\\gamma.jsonl', dir: 'sessions', ageMs: 3_600_000, active: false, recent: false, title: 'Gamma', cwd: 'C:\\work\\gamma',
+      model: 'model-gamma', thinking: null, stage: 'unknown' as const, lastTool: null, lastToolAt: null,
     },
   ]
   mounted = await mount(panel, {
@@ -131,7 +135,10 @@ test('shows every session with its own model and separates the rows', async () =
   assert.ok(mounted.find({ text: 'Beta' }))
   assert.match(mounted.find({ text: /model-alpha/ })?.text ?? '', /model-alpha · high/)
   assert.match(mounted.find({ text: /model-beta/ })?.text ?? '', /model-beta/)
-  // One line between the two session blocks, not one fixed detail pane.
+  // Old records still exist in the list response, but must not be drawn.
+  assert.equal(mounted.find({ text: 'Gamma' }), null)
+  assert.equal(mounted.find({ text: /model-gamma/ }), null)
+  // One line between the two visible session blocks.
   assert.equal(mounted.findAll({ type: 'Separator' }).length, 1)
   // The list already carries each model; the panel must not fan out one
   // session.status call per row.

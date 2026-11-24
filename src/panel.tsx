@@ -8,7 +8,7 @@ type ModelLoadState = 'idle' | 'loading' | 'ready' | 'error'
 const modelState = atom<ModelLoadState>('idle')
 const modelLoaded = atom(false)
 const modelError = atom<string | null>(null)
-type SessionRow = { file: string; dir: string; ageMs: number; active: boolean; title: string | null; cwd: string | null; model: string | null; thinking: string | null; stage: SessionStage; lastTool: string | null; lastToolAt: string | null }
+type SessionRow = { file: string; dir: string; ageMs: number; active: boolean; recent: boolean; title: string | null; cwd: string | null; model: string | null; thinking: string | null; stage: SessionStage; lastTool: string | null; lastToolAt: string | null }
 type ReviewResult = { verdict: string; summary: string; findings: { severity: string; file: string; line: number | null; message: string }[] }
 type DriverState = { verdict: string; summary: string; findings: { severity: string; file: string; line: number | null; message: string }[]; at: string | null; round: number | null; consumed: boolean; driverAlive: boolean; driverPid: number | null }
 type SessionListState = { state: 'idle' | 'loading' | 'ready' | 'error'; error: string | null }
@@ -121,7 +121,7 @@ async function stopAcceptance(force: boolean) {
 const busy = atom(false)
 const editing = atom<string | null>(null)
 const draft = atom<Record<string, { model?: string; effort?: string | null; search?: string }>>({})
-const PLUGIN_VERSION = '0.1.21'
+const PLUGIN_VERSION = '0.1.22'
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function stageLabel(stage: SessionStage): string {
@@ -410,26 +410,24 @@ function projectName(cwd: string | null): string {
 }
 
 function sessionsCard(rows: SessionRow[], listState: SessionListState) {
-  const active = rows.filter((row) => row.active).length
+  const visible = rows.filter((row) => row.recent !== false)
+  const active = visible.filter((row) => row.active).length
+  const description = visible.length
+    ? `${visible.length} 个会话${active ? ` · ${active} 个活跃` : ''} · 最近 15 分钟`
+    : listState.state === 'ready' ? '最近 15 分钟没有进行中的会话' : 'OMP 会话'
   return (
-    <Card title="OMP 会话" description={rows.length ? `${rows.length} 个会话${active ? ` · ${active} 个活跃` : ''} · 最近 15 分钟` : '最近 15 分钟没有进行中的会话'}>
+    <Card title="OMP 会话" description={description}>
       <Stack gap="sm">
-        {listState.state === 'error' && rows.length > 0 && (
+        {listState.state === 'error' && (
           <Text size="xs" tone="warning">列表刷新失败：{listState.error}（保留上次结果，下个周期重试）</Text>
         )}
-        {rows.length === 0 && listState.state === 'error' && (
-          <Stack gap="xs">
-            <Text size="sm" tone="warning">会话列表读取失败：{listState.error}</Text>
-            <Text size="xs" muted>面板会每 3 秒自动重试。</Text>
-          </Stack>
-        )}
-        {rows.length === 0 && listState.state === 'ready' && (
+        {visible.length === 0 && listState.state === 'ready' && (
           <EmptyState title="暂无进行中的会话" description="在 OMP 里继续一个会话后，它会自动出现在这里。" icon="activity" />
         )}
-        {rows.length === 0 && (listState.state === 'idle' || listState.state === 'loading') && (
+        {visible.length === 0 && (listState.state === 'idle' || listState.state === 'loading') && (
           <Text size="xs" muted>正在读取会话…</Text>
         )}
-        {rows.map((row, index) => (
+        {visible.map((row, index) => (
           <Stack key={row.file} gap="sm">
             {index > 0 && <Separator />}
             <Stack gap="xs">
