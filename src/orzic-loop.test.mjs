@@ -265,6 +265,55 @@ test('plan: routes to planner and blocks non-plan writes and bash', async () => 
   assert.equal(ev?.block, true)
 })
 
+test('plan: tells the planner how to hand off', async () => {
+  const env = setup()
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'm1.jsonl'))
+  const out = await env.fire('before_agent_start', { prompt: '审查并做计划' }, ctx)
+  assert.match(out?.message?.content ?? '', /PLAN\.md/)
+  assert.equal(out.message.display, false)
+})
+
+test('plan: blocks implementation delegation', async () => {
+  const env = setup()
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'm2.jsonl'))
+  await env.fire('before_agent_start', { prompt: '重构验收循环，拆解成步骤再实现' }, ctx)
+  const spawned = await env.fire('tool_call', { toolCallId: 'task-1', toolName: 'task', input: { tasks: [{ task: '实现并提交' }] } }, ctx)
+  assert.equal(spawned?.block, true)
+})
+
+test('plan: a reloaded extension still blocks writes for the saved session', async () => {
+  const env = setup()
+  const session = join(env.agent, 'sessions', 'm3.jsonl')
+  const ctx = env.ctxFor(session)
+  await env.fire('before_agent_start', { prompt: '重构验收循环，拆解成步骤再实现' }, ctx)
+  // A resumed process can receive tool calls before session_start knows the
+  // session file; the marker has to keep the read-only gate closed.
+  const handlers = {}
+  loop({ on: (name, fn) => { handlers[name] = fn }, setModel: async () => true, setThinkingLevel: () => {} })
+  const blocked = await handlers.tool_call({ toolCallId: 'r1', toolName: 'bash', input: { command: 'git status' } }, ctx)
+  assert.equal(blocked?.block, true)
+})
+
+test('subagent sessions keep their own model policy and write access', async () => {
+  const env = setup()
+  const ctx = { ...env.ctxFor(join(env.agent, 'sessions', 'sub.jsonl')), agent: { kind: 'sub', id: 'CoreCapabilities', depth: 1 } }
+  await env.fire('session_start', {}, ctx)
+  await env.fire('before_agent_start', { prompt: '实现制造能力合同' }, ctx)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.deepEqual(env.setModels, [])
+  assert.equal(await env.fire('tool_call', { toolCallId: 's1', toolName: 'bash', input: { command: 'ls' } }, ctx), undefined)
+  assert.equal(await env.fire('tool_call', { toolCallId: 's2', toolName: 'task', input: { tasks: [] } }, ctx), undefined)
+})
+
+test('subagent writes never start the review driver', async () => {
+  const env = setup()
+  const ctx = { ...env.ctxFor(join(env.agent, 'sessions', 'sub2.jsonl')), agent: { kind: 'sub', id: 'CoreCapabilities', depth: 1 } }
+  await env.fire('before_agent_start', { prompt: '实现' }, ctx)
+  await completeWrite(env, ctx)
+  await env.fire('agent_end', { willContinue: false }, ctx)
+  assert.equal(existsSync(join(env.agent, 'spawn.json')), false)
+})
+
 test('plan: a completed PLAN.md write snapshots it and switches to executor', async () => {
   const env = setup()
   const session = join(env.agent, 'sessions', 'c.jsonl')
@@ -307,6 +356,31 @@ test('plan: selectors with :effort still resolve', async () => {
   await completePlanWrite(env, ctx)
   assert.deepEqual(env.setModels, ['planner/plan', 'executor/code'])
   assert.deepEqual(env.levels, ['high', 'max'])
+})
+
+test('an execution task spawn reviews the parent after async work settles', async () => {
+  const env = setup()
+  const session = join(env.agent, 'sessions', 'task-parent.jsonl')
+  const ctx = env.ctxFor(session)
+  await enterExecution(env, ctx)
+  await env.fire('tool_call', { toolCallId: 'deleg-1', toolName: 'task', input: { tasks: [{ task: '实现并提交' }] } }, ctx)
+  await env.fire('tool_execution_end', { toolCallId: 'deleg-1', toolName: 'task', isError: false, result: {} }, ctx)
+  await env.fire('agent_end', { willContinue: false, awaitingAsyncWork: true }, ctx)
+  assert.equal(existsSync(join(env.agent, 'spawn.json')), false, 'background work must not be reviewed mid-flight')
+  await env.fire('agent_end', { willContinue: false, awaitingAsyncWork: false }, ctx)
+  assert.equal(existsSync(join(env.agent, 'spawn.json')), true)
+  const spawn = JSON.parse(readFileSync(join(env.agent, 'spawn.json'), 'utf8'))
+  assert.equal(spawn.sessionFile, session)
+})
+
+test('a failed task spawn does not start review', async () => {
+  const env = setup()
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'task-fail.jsonl'))
+  await enterExecution(env, ctx)
+  await env.fire('tool_call', { toolCallId: 'deleg-2', toolName: 'task', input: { tasks: [{ task: '实现' }] } }, ctx)
+  await env.fire('tool_execution_end', { toolCallId: 'deleg-2', toolName: 'task', isError: true, result: {} }, ctx)
+  await env.fire('agent_end', { willContinue: false, awaitingAsyncWork: false }, ctx)
+  assert.equal(existsSync(join(env.agent, 'spawn.json')), false)
 })
 
 test('agent_end: a completed write turn spawns the driver exactly once', async () => {

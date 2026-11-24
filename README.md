@@ -15,9 +15,12 @@ OMP 的规划/执行侧栏调度器 + 自动验收循环。新请求先交给规
 - **新任务先规划**：每条新请求（包括“审查一下 / 做个计划”）都切规划模型；不再按关键词或字数猜成执行
 - **执行阶段**：只有本轮成功写入 `PLAN.md` 后才切执行模型；此后只有“继续 / 按计划执行 / 好 / ok”这类**不含新指令**的短句保持执行模型
 - **重新规划**：执行阶段出现新的审查、修改或计划要求，回到规划模型
-- **规划只读**：`bash` 全阻断，写工具只允许 `PLAN.md`；空计划或写入失败不交接
+- **规划只读**：`bash`/`eval` 全阻断，`task` 委派阻断，写工具只允许 `PLAN.md`；空计划或写入失败不交接
+- **规划指令注入**：规划轮会注入一条隐藏说明，明确只读边界和 `PLAN.md` 交接出口；不再只靠被拦截后的报错让模型猜
+- **阶段落盘**：规划阶段写入 `~/.omp/agent/orzic-phases/<session-hash>.json`（12 小时内有效），进程恢复后首个工具调用也会重新判定；交接成功后删除标记
 - **模型不可用**：本轮中止并提示，绝不静默降级到另一个模型
-- **子代理同规则** = 内置 task 子代理也启用(`task.prewalk`)
+- **子代理不参与路由**：Orzic 只调度主会话；`task` 子代理的模型由 OMP 自己决定，不会重走规划、不会阻塞写入，也不会覆盖主会话的 `orzic-plan-<repoKey>.json` 计划快照
+- **子代理同规则** = 面板开关把内置 `task` 子代理交给 OMP 的 `task.prewalk`，与上面这条 Orzic 路由边界是两件事
 - 会话卡实时显示当前模型、最近工具和模型切换时间线；多会话可切换查看
 
 ## 验收(Acceptance)
@@ -32,7 +35,7 @@ OMP 的规划/执行侧栏调度器 + 自动验收循环。新请求先交给规
 
 ### 自动验收循环(`orzic-driver.mjs`)
 
-`orzic-loop.ts`(OMP 扩展)在 `agent_end` 检测本轮是否实际执行过受识别的写入工具。结构化 `edit`/`write`/`ast_edit`/`notebook` 需 `isError=false`；`bash`/`eval` 只要实际执行过就算（非零退出也可能已经提交或改文件），最终由 driver 按实际 `HEAD` diff 判定；`PLAN.md` 写入和规划期被阻断的调用不触发。以及 `autoReview` → spawn **detached `orzic-driver.mjs`**。这里记录的是工具调用,不是校验文件是否真的变化;driver 跑在 OMP 进程外：
+`orzic-loop.ts`(OMP 扩展)在 `agent_end` 检测本轮是否实际执行过受识别的写入工具。结构化 `edit`/`write`/`ast_edit`/`notebook` 需 `isError=false`；`bash`/`eval` 只要实际执行过就算（非零退出也可能已经提交或改文件）；执行阶段完成的 `task` 委派也算一次可写轮次（子代理在独立会话提交，父会话可能没有直接写入），最终由 driver 按实际 `HEAD` diff 判定；`PLAN.md` 写入和规划期被阻断的调用不触发。若 `agent_end` 仍在等待后台 task（`awaitingAsyncWork`），验收标记保留到后台结果回来后的最终 settle，再由父 session pin 启动一次 driver。以及 `autoReview` → spawn **detached `orzic-driver.mjs`**。这里记录的是工具调用,不是校验文件是否真的变化;driver 跑在 OMP 进程外：
 
 1. `git diff HEAD~1..HEAD` → `omp --mode json` 评审 → 写 `~/.omp/agent/orzic-review-<key>.json`
 2. verdict `rework` + `autoRework` → `omp -r <session>` 注入 findings 返工(≤ `maxRework` 轮)
@@ -71,10 +74,11 @@ npm run smoke:omp
 
 ## 验证记录（本次路由返工）
 
-- `npx tsc -p .` 通过；路由测试 19 项，全套 `node --test src/*.test.mjs` 通过。
+- 钣金拆解会话实证:`handoff` 从未发生、`model_change` 只到 Astra,但 01:52:42 起写入和 bash 已放行——规划门禁在进程恢复后静默丢失;两个子代理各自写 `PLAN.md` 并把仓库级计划快照覆盖成子代理计划。
+- 修复后 `npx tsc -p .` 通过;`node --test src/orzic-loop.test.mjs` 35 项全过,新增子代理隔离、`task` 阻断、重载后仍拦截、规划指令注入 5 项。
+- 真实 OMP 19.1.1 `npm run smoke:omp`(planner `openai-codex/gpt-6-astra:xhigh` → executor `magpie/auto/deepseek-v4.1-flash:max`):规划写入 `PLAN.md` 后交接,执行模型回复 `HANDOFF`。
 - 独立临时 OMP（隔离 `ORZIC_AGENT_DIR` 与 `--session-dir`，`ORZIC_DRIVER` 未设置）：
   - 钣金拆解原句 → `route phase=planning selector=openai-codex/gpt-6-luna ok=true`，assistant 模型 `gpt-6-luna`。
-  - 成功写 `PLAN.md` → 写入完成后才出现 `handoff ... selector=magpie/auto/deepseek-v4.1-flash ok=true`，后续 assistant 模型为 DeepSeek，计划快照生成。
   - 规划模型不可用 → 无 session 文件、无 assistant 回复（`ctx.abort()` 停轮）。
   - 历史 `PLAN.md` 存在但本轮未写 → 不生成快照，仍由规划模型回答。
 - 扩展经 `orca plugin restart local.orzic` 同步；`~/.omp/agent/extensions/orzic-loop.ts` 与 `src/orzic-loop.ts` 字节一致。**运行中的 OMP 必须重启（Ctrl+C 后重开）才会加载新版扩展。**
@@ -125,5 +129,7 @@ npm run smoke:omp
 - `omp -r` 注入的是**当前 OMP session 文件**;同一 cwd 多个会话时只认 `ORZIC_SESSION_FILE` pin,pin 失败降级为 review-only 而不是猜。由 driver 启动的 `omp -r` 返工轮带 `ORZIC_DRIVER=1`，按设计跳过规划/执行路由。
 - Driver 只读捕获时的 `HEAD~1..HEAD`;仅写文件但未提交时即使调用受识别工具触发 hook,也可能评审旧 HEAD 的提交差异;空提交没有可评审 diff。首次验证必须让 OMP 在本轮结束前创建新的非空 commit。
 - `prompt_submit` 不再发任何消息：回喂只走 driver 的 `omp -r`;会话内注入会和 driver 撞窗口、还可能把旧 verdict 喂给同 cwd 的兄弟会话。
-- **阶段只在进程内**:规划/执行状态保存在扩展内存;OMP 重启或手动 `omp -r` 后第一条消息重新规划。driver 自己的 `omp -r` 带 `ORZIC_DRIVER=1`,跳过路由并显式 `--model @default`,不受此影响。
+- **阶段在进程内，规划标记在磁盘**:规划/执行状态保存在扩展内存;OMP 重启或手动 `omp -r` 后第一条消息重新规划。唯一例外是规划阶段本身:标记落盘后,即使恢复进程先收到工具调用、`session_start` 还没拿到会话文件,也会继续拦截写入,不会退化成“Astra 规划 + 已允许写”。交接成功后标记删除,执行阶段重启仍按新任务重新规划。driver 自己的 `omp -r` 带 `ORZIC_DRIVER=1`,跳过路由并显式 `--model @default`,不受此影响。
+- **子代理不写主计划**:路由、只读门禁和验收 `agent_end` 只处理 `ctx.agent.kind !== 'sub'` 的会话。子代理即使由执行阶段拉起,也不会把自己的 `PLAN.md` 写进 `orzic-plan-<repoKey>.json`;验收评审引用的始终是主会话批准的计划。
+- **委派验收的边界**:父会话在 `task` 委派完成后触发一次验收,由父 session pin 决定注入目标;评审的是父仓库当时的 `HEAD` 提交。子代理只改工作树、没有提交时仍会落回“无 diff/unreviewed”(既有 `HEAD~1..HEAD` 边界),不会把未提交改动当成已验收。
 - verdict/lock/stop 文件按仓库分名(`orzic-review-<key>` 等):多 repo 可并发跑 driver。同一 cwd 下两个会话仍只认 `ORZIC_SESSION_FILE` pin 的那一个;`acceptance.result/stop` 依赖面板给出正确 `repo`。

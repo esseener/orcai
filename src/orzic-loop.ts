@@ -11,7 +11,7 @@ import { basename, isAbsolute, join } from 'node:path'
 
 type PiModel = { provider?: string; id?: string }
 type PiEvent = {
-  prompt?: string; toolName?: string; willContinue?: boolean
+  prompt?: string; toolName?: string; willContinue?: boolean; awaitingAsyncWork?: boolean
   toolCallId?: string; isError?: boolean
   input?: Record<string, unknown>
 }
@@ -22,6 +22,7 @@ type PiCtx = {
   sessionManager?: { getSessionId?(): unknown; getSessionFile?(): unknown }
   ui?: { notify?(text: string, tone?: string): void }
   abort?(): void
+  agent?: { kind?: string; id?: string; name?: string; depth?: number }
 }
 type Pi = {
   on(name: string, fn: (event: PiEvent, ctx: PiCtx) => unknown | Promise<unknown>): void
@@ -76,6 +77,19 @@ const readCfg = (): AcceptanceCfg => {
   }
 }
 
+// OMP rebinds an extension factory to every subagent session. Routing a
+// subagent as a fresh top-level task forces the planner model on it, blocks
+// its writes, and lets it overwrite the parent's repo-scoped plan snapshot;
+// subagent model policy belongs to OMP (task.prewalk and agent overrides).
+const mainOnly = (ctx?: PiCtx): boolean => ctx?.agent?.kind !== 'sub'
+
+// The phase lived only in this process, so a resumed process that fired
+// session_start before the session file was known silently dropped the
+// read-only gate while the planner model stayed active. The marker makes the
+// gate fail closed across resumes; execution is still re-planned on restart.
+const phaseFile = (sessionFile: string): string =>
+  join(agentRoot(), 'orzic-phases', `${createHash('sha256').update(sessionFile).digest('hex').slice(0, 16)}.json`)
+
 const nodeBin = ['node', 'node.exe', 'C:/Program Files/nodejs/node.exe'].find((p) => {
   try { return p.includes('/') || p.includes('\\\\') ? existsSync(p) : true } catch { return false }
 }) ?? 'node'
@@ -94,9 +108,40 @@ export default function (pi: Pi): void {
   const planning = new Map<string, { cwd: string }>()
   const executing = new Set<string>()
   const pendingPlanWrites = new Map<string, { session: string; turn: number; cwd: string; target: string; content: string | null }>()
-  const pendingWrites = new Map<string, { session: string; turn: number; isPlan: boolean; shell: boolean }>()
+  const pendingWrites = new Map<string, { session: string; turn: number; isPlan: boolean; shell: boolean; delegated: boolean }>()
   const turnBySession = new Map<string, number>()
   let turnSeq = 0
+
+  const rememberPlanning = (f: string): void => {
+    if (!f) return
+    try {
+      mkdirSync(join(agentRoot(), 'orzic-phases'), { recursive: true })
+      writeFileSync(phaseFile(f), JSON.stringify({ phase: 'planning', sessionFile: f, at: new Date().toISOString() }), 'utf8')
+    } catch { /* best effort */ }
+  }
+
+  const forgetPlanning = (f: string): void => {
+    if (!f) return
+    try { unlinkSync(phaseFile(f)) } catch { /* no marker */ }
+  }
+
+  const hydrated = new Set<string>()
+  const hydrate = (f: string): boolean => {
+    if (!f) return false
+    if (planning.has(f)) return true
+    if (hydrated.has(f)) return false
+    hydrated.add(f)
+    try {
+      const d = JSON.parse(readFileSync(phaseFile(f), 'utf8')) as { phase?: unknown; sessionFile?: unknown; at?: unknown }
+      const at = Date.parse(String(d?.at ?? ''))
+      if (d?.phase === 'planning' && d.sessionFile === f && Number.isFinite(at) && Date.now() - at < 12 * 60 * 60_000) {
+        planning.set(f, { cwd: pinCwds.get(f) ?? '' })
+        boot(`planning restored session=${f}`)
+        return true
+      }
+    } catch { /* no marker */ }
+    return false
+  }
 
   const pinSession = (ctx?: PiCtx): string => {
     try {
@@ -181,6 +226,7 @@ export default function (pi: Pi): void {
   }
 
   pi.on('session_start', async (_e, ctx) => {
+    if (!mainOnly(ctx)) return
     const f = pinSession(ctx)
     boot(`session_start sf=${f}`)
     planning.delete(f)
@@ -189,6 +235,7 @@ export default function (pi: Pi): void {
     pendingPlanWrites.clear()
     wroteSessions.delete(f)
     turnBySession.set(f, ++turnSeq)
+    if (f) { hydrated.delete(f); hydrate(f) }
     const cfg = readCfg()
     if (!cfg.autoRoute || process.env.ORZIC_DRIVER || !cfg.planner) return
     const ok = await useModel(ctx, cfg.planner)
@@ -197,13 +244,15 @@ export default function (pi: Pi): void {
   pi.on('agent_start', (_e, ctx) => { pinSession(ctx) })
 
   pi.on('before_agent_start', async (e, ctx) => {
+    if (!mainOnly(ctx)) return
     const f = pinSession(ctx)
     if (!f) return
     turnBySession.set(f, ++turnSeq)
     const cfg = readCfg()
     if (process.env.ORZIC_DRIVER) return
-    if (!cfg.autoRoute) { planning.delete(f); executing.delete(f); return }
+    if (!cfg.autoRoute) { planning.delete(f); executing.delete(f); forgetPlanning(f); return }
     if (typeof e?.prompt !== 'string' || !e.prompt.trim()) return
+    hydrate(f)
     const resume = executing.has(f) && continuation.test(e.prompt.trim())
     if (resume) {
       const ok = await useModel(ctx, cfg.executor)
@@ -213,10 +262,12 @@ export default function (pi: Pi): void {
         ctx.abort?.()
         throw new Error(`Orzic: 执行模型不可用 ${cfg.executor}`)
       }
+      forgetPlanning(f)
       return
     }
     executing.delete(f)
     planning.set(f, { cwd: ctx.cwd })
+    rememberPlanning(f)
     if (!cfg.planner) {
       ctx.ui?.notify?.('Orzic: 未配置规划模型，本轮停止。', 'warning')
       ctx.abort?.()
@@ -232,22 +283,37 @@ export default function (pi: Pi): void {
       throw new Error(`Orzic: 规划模型不可用 ${cfg.planner}`)
     }
     ctx.ui?.notify?.(`Orzic: 规划 ${cfg.planner}`, 'info')
+    // Without this the planner only learns the exit path from a blocked tool
+    // call, so a plan presented in chat never creates PLAN.md and the session
+    // stays on the planner while the user believes work has started.
+    return {
+      message: {
+        customType: 'orzic-planning',
+        display: false,
+        content: 'Orzic 规划阶段：本轮只读。bash/eval、task 委派以及除 PLAN.md 外的写入都会被拦截。完成调研后，把可执行计划写入仓库根目录 PLAN.md；写入成功后自动切换执行模型。只需回答或评估时，直接回复即可。',
+      },
+    }
   })
 
   pi.on('tool_call', async (e, ctx) => {
+    if (!mainOnly(ctx)) return
     const f = pinSession(ctx)
     const name = e?.toolName ?? ''
     const input = e?.input ?? {}
     const target = String(input.path ?? input.file_path ?? input.file ?? '')
-    const plan = f ? planning.get(f) : undefined
+    const plan = f && hydrate(f) ? planning.get(f) : undefined
     const turn = f ? turnBySession.get(f) ?? 0 : 0
     if (!plan) {
-      if (f && executing.has(f) && WRITE_TOOLS.has(name) && e.toolCallId) {
+      if (f && executing.has(f) && (WRITE_TOOLS.has(name) || name === 'task') && e.toolCallId) {
         const shell = name === 'bash' || name === 'eval'
-        pendingWrites.set(e.toolCallId, { session: f, turn, isPlan: !shell && MUTATING.has(name) && isPlanTarget(target), shell })
+        const delegated = name === 'task'
+        pendingWrites.set(e.toolCallId, { session: f, turn, isPlan: !shell && MUTATING.has(name) && isPlanTarget(target), shell, delegated })
       }
       return
     }
+    // A task spawn runs in its own session, so the read-only gate here cannot
+    // stop its writes; delegation would let implementation bypass the plan.
+    if (name === 'task') return { block: true, reason: '规划阶段只允许只读调研；先写 PLAN.md 完成计划。' }
     if (name === 'bash' || name === 'eval') return { block: true, reason: '规划阶段只读；计划完成后会自动切换到执行模型。' }
     if (name === 'write' || name === 'edit' || name === 'ast_edit' || name === 'notebook') {
       if (!isPlanTarget(target)) return { block: true, reason: '规划阶段只允许写 PLAN.md；先完成计划。' }
@@ -257,7 +323,7 @@ export default function (pi: Pi): void {
         content = String(input.content ?? '')
         if (!content.trim()) return { block: true, reason: '计划内容为空；请先把完整计划写入 PLAN.md。' }
       }
-      pendingWrites.set(e.toolCallId, { session: f, turn, isPlan: true, shell: false })
+      pendingWrites.set(e.toolCallId, { session: f, turn, isPlan: true, shell: false, delegated: false })
       // Do not switch here: the tool may still fail or be cancelled. The
       // matching tool_execution_end decides, and agent_end never approves a
       // historical PLAN.md.
@@ -266,17 +332,18 @@ export default function (pi: Pi): void {
   })
 
   pi.on('tool_execution_end', async (e, ctx) => {
+    if (!mainOnly(ctx)) return
     if (!e.toolCallId) return
     const f = pinSession(ctx)
     const turn = f ? turnBySession.get(f) ?? -1 : -1
     const write = pendingWrites.get(e.toolCallId)
     if (write) {
       pendingWrites.delete(e.toolCallId)
-      // A missing isError is not a success. A nonzero bash/eval exit still
-      // counts because the command may have committed before failing; only
-      // structured edit/write tools treat isError as "nothing happened".
+      // A completed task spawn means subagents ran in their own sessions; the
+      // parent may have no direct writes, but their commits still need review.
+      // The driver reviews the parent-pinned repo HEAD, so it sees that work.
       const completed = typeof e.isError === 'boolean'
-      const mayHaveWritten = write.shell ? completed : e.isError === false
+      const mayHaveWritten = write.delegated ? e.isError === false : write.shell ? completed : e.isError === false
       if (mayHaveWritten && write.session === f && write.turn === turn && !write.isPlan) wroteSessions.add(write.session)
     }
     const pending = pendingPlanWrites.get(e.toolCallId)
@@ -309,9 +376,11 @@ export default function (pi: Pi): void {
     }
     planning.delete(f)
     executing.add(f)
+    forgetPlanning(f)
   })
 
   pi.on('agent_end', (e, ctx) => {
+    if (!mainOnly(ctx)) return
     if (e?.willContinue === true) return
     const self = pinSession(ctx)
     if (self) {
@@ -320,6 +389,18 @@ export default function (pi: Pi): void {
       for (const [id, p] of pendingPlanWrites) if (p.session === self) pendingPlanWrites.delete(id)
     }
     const acc = readCfg()
+    if (e?.awaitingAsyncWork === true) {
+      // Background task agents may commit after this settle. Keep the review
+      // flag and let the settle after their results arrive start the driver.
+      if (self) {
+        try {
+          const dir = process.env.ORZIC_AGENT_DIR || join(homedir(), '.omp', 'agent')
+          mkdirSync(dir, { recursive: true })
+          writeFileSync(join(dir, 'orzic-loop.log'), `${new Date().toISOString()} agent_end: awaiting async work — review deferred\n`, { flag: 'a' })
+        } catch { /* best effort */ }
+      }
+      return
+    }
     const agentRootDir = process.env.ORZIC_AGENT_DIR || join(homedir(), '.omp', 'agent')
     const log = (m: string) => { try { mkdirSync(agentRootDir, { recursive: true }); writeFileSync(join(agentRootDir, 'orzic-loop.log'), `${new Date().toISOString()} ${m}\n`, { flag: 'a' }) } catch { /* best effort */ } }
     if (process.env.ORZIC_DRIVER) { log('driver-run: skip'); return }
