@@ -1,7 +1,7 @@
 import { atom, Badge, Box, Button, Card, Checkbox, EmptyState, IconButton, Image, Input, KeyValue, on, plugin, read, Row, Separator, set, Stack, Tab, Tabs, Text, Textarea, type PanelContext } from 'orca'
 import type { FusionState, OmpModel, SessionStage, SessionStatus } from './protocol'
 import { filterModelChoices, isFusionModel } from './orzic-models.mjs'
-import { RECENT_WINDOW_MINUTES, applyHostState, sessionVisible, sortSessions } from './orzic-session-state.mjs'
+import { RECENT_WINDOW_MINUTES, applyHostState, mergeHostOverrides, sessionVisible, sortSessions } from './orzic-session-state.mjs'
 
 const status = atom<{ data?: { models?: OmpModel[]; fusion: FusionState }; error?: string } | null>(null)
 const modelList = atom<OmpModel[]>([])
@@ -122,7 +122,7 @@ async function stopAcceptance(force: boolean) {
 const busy = atom(false)
 const editing = atom<string | null>(null)
 const draft = atom<Record<string, { model?: string; effort?: string | null; search?: string }>>({})
-const PLUGIN_VERSION = '0.1.25'
+const PLUGIN_VERSION = '0.1.26'
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function stageLabel(stage: SessionStage): string {
@@ -192,17 +192,24 @@ function patch(patch: { enabled?: boolean; from?: string; fromEffort?: string | 
 }
 
 let listBusy = false
+let listQueued = false
+type HostState = 'working' | 'blocked' | 'waiting' | 'done'
+const hostOverrides = new Map<string, HostState>()
 let acceptanceAbort: AbortController | null = null
 let acceptanceRepo: string | null = null
 
-async function loadSessionList(sig: AbortSignal): Promise<SessionRow[] | null> {
-  if (listBusy) return null
+async function loadSessionList(sig: AbortSignal, force = false): Promise<SessionRow[] | null> {
+  if (listBusy) {
+    if (force) listQueued = true
+    return null
+  }
   listBusy = true
   if (read(sessionListState).state === 'idle') set(sessionListState, { state: 'loading', error: null })
   try {
     const response = await plugin.request('session.list', {}, { signal: sig, timeoutMs: 10_000 }) as { sessions: SessionRow[]; activeError: string | null }
     if (sig.aborted) return null
-    const rows = response.sessions
+    // A snapshot requested before an event must not undo the event.
+    const rows = mergeHostOverrides(response.sessions, hostOverrides)
     set(sessionList, rows)
     set(activeError, response.activeError)
     set(sessionListState, { state: 'ready', error: null })
@@ -213,6 +220,10 @@ async function loadSessionList(sig: AbortSignal): Promise<SessionRow[] | null> {
     return null
   } finally {
     listBusy = false
+    if (listQueued && !sig.aborted) {
+      listQueued = false
+      void loadSessionList(sig)
+    }
   }
 }
 
@@ -247,14 +258,17 @@ async function loadAcceptance(sig: AbortSignal) {
 export function setup(ctx: PanelContext) {
   panelAbort = ctx.signal
   listBusy = false
+  listQueued = false
+  hostOverrides.clear()
   // Status events update the matching row immediately; the 3s poll remains as
   // a calibration for new/removed sessions and missed events.
   const agentsSub = on('agent.status.changed', (payload) => {
     if (ctx.signal.aborted) return
     if (payload.sessionId) {
+      hostOverrides.set(payload.sessionId, payload.state)
       set(sessionList, read(sessionList).map((row) => applyHostState(row, payload.sessionId ?? null, payload.state)))
     }
-    void loadSessionList(ctx.signal)
+    void loadSessionList(ctx.signal, true)
   })
   void refresh(ctx.signal)
   void fetchModels(ctx.signal)
@@ -296,6 +310,8 @@ export function setup(ctx: PanelContext) {
     acceptanceAbort?.abort()
     acceptanceRepo = null
     listBusy = false
+    listQueued = false
+    hostOverrides.clear()
   }
   ctx.signal.addEventListener('abort', stop, { once: true })
 }
@@ -440,27 +456,24 @@ function sessionsCard(rows: SessionRow[], listState: SessionListState) {
         )}
         {visible.map((row, index) => {
           const badge = sessionBadge(row)
+          const meta = [
+            row.active ? '活跃' : null,
+            projectName(row.cwd),
+            row.lastTool ? `工具 ${row.lastTool}${row.lastToolAt ? ` · ${new Date(row.lastToolAt).toLocaleTimeString()}` : ''}` : null,
+          ].filter(Boolean).join(' · ')
           return (
             <Stack key={row.file} gap="sm">
               {index > 0 && <Separator />}
-              <Stack gap="xs">
-                <Row justify="between" align="start" gap="sm">
-                  <Text size="sm" weight="medium">{sessionTitle(row)}</Text>
-                  <Badge tone={badge.tone}>{badge.label}</Badge>
-                </Row>
-                <Stack gap="none">
-                  <Text size="xs" muted>模型</Text>
+              <Box paddingY="xs">
+                <Stack gap="sm">
+                  <Row justify="between" align="start" gap="sm">
+                    <Text size="sm" weight="medium">{sessionTitle(row)}</Text>
+                    <Badge tone={badge.tone}>{badge.label}</Badge>
+                  </Row>
                   <Text size="sm">{row.model ?? '未知'}{row.thinking ? ` · ${row.thinking}` : ''}</Text>
+                  {meta && <Text size="xs" muted>{meta}</Text>}
                 </Stack>
-                <Row justify="between" gap="sm" align="center" wrap>
-                  <Text size="xs" muted>
-                    {row.lastTool
-                      ? `最近工具 ${row.lastTool}${row.lastToolAt ? ` · ${new Date(row.lastToolAt).toLocaleTimeString()}` : ''}`
-                      : '还没有工具调用记录'}
-                  </Text>
-                  <Text size="xs" muted>{[row.active ? '活跃' : null, projectName(row.cwd)].filter(Boolean).join(' · ')}</Text>
-                </Row>
-              </Stack>
+              </Box>
             </Stack>
           )
         })}
