@@ -1,4 +1,4 @@
-<img src="assets/logo5.png" alt="Orcai" height="48">
+<img src="assets/word.png" alt="Orcai" height="38">
 
 # Orcai
 
@@ -18,7 +18,7 @@
 
 ## 版本与发布
 
-当前版本 **0.1.18**，见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **0.1.19**，见 [CHANGELOG.md](CHANGELOG.md)。
 
 版本号同时维护在四处：
 
@@ -36,12 +36,13 @@ npm run typecheck
 npm test
 npm run smoke:omp
 # 2. 提交后打标签
-git tag -a v0.1.18 -m "v0.1.18"
+git tag -a v0.1.19 -m "v0.1.19"
 ```
 
 ## 面板模块
 
-- **Orzic (Fusion)**：开始任务、规划/执行模型、验收设置和 OMP 会话状态。模块头显示「规划 → 执行 → 验收」流程与「规划路由开/关」。
+- **Orzic (Fusion)**：路由开关、规划/执行模型、验收设置。模块头显示「规划 → 执行 → 验收」流程与「规划路由开/关」。
+- **会话**：全部 OMP 会话固定顺序列出，点击固定查看，规划/执行/验收阶段在详情区原地更新，不会因活跃会话变化自动切走。详情可暂停跟随，查看暂停时的快照。
 - **便签**：记录运行中的临时想法，支持新建、编辑、删除和持久保存。点击「复制」后手动粘贴到 OMP 输入框并自行提交；便签不会自动注入或发送。
 
 ## Orzic：规划/执行路由

@@ -1,4 +1,4 @@
-import { atom, Badge, Box, Button, Card, Checkbox, EmptyState, IconButton, Image, Input, KeyValue, on, plugin, read, Row, Select, Separator, set, Stack, Tab, Tabs, Text, Textarea, type PanelContext } from 'orca'
+import { atom, Badge, Box, Button, Card, Checkbox, EmptyState, IconButton, Image, Input, KeyValue, List, ListItem, on, plugin, read, Row, Separator, set, Stack, Tab, Tabs, Text, Textarea, type PanelContext } from 'orca'
 import type { FusionState, OmpModel, SessionStage, SessionStatus } from './protocol'
 import { filterModelChoices, isFusionModel } from './orzic-models.mjs'
 
@@ -9,8 +9,11 @@ const modelState = atom<ModelLoadState>('idle')
 const modelLoaded = atom(false)
 const modelError = atom<string | null>(null)
 const session = atom<{ data?: SessionStatus; error?: string } | null>(null)
-const sessionList = atom<{ file: string; dir: string; ageMs: number; active: boolean; title: string | null; cwd: string | null }[]>([])
-const sessionFile = atom<string | null>(null)
+type SessionRow = { file: string; dir: string; ageMs: number; active: boolean; title: string | null; cwd: string | null }
+const sessionList = atom<SessionRow[]>([])
+const sessionFile = atom<string | null>('orzic.sessionFile', null, { persist: 'storage' })
+const sessionQuery = atom('')
+const followSession = atom(true)
 const reviewing = atom(false)
 const reviewResult = atom<{ verdict: string; summary: string; findings: { severity: string; file: string; line: number | null; message: string }[] } | null>(null)
 const driverState = atom<DriverState | null>(null)
@@ -89,7 +92,7 @@ async function runReview() {
 const busy = atom(false)
 const editing = atom<string | null>(null)
 const draft = atom<Record<string, { model?: string; effort?: string | null; search?: string }>>({})
-const PLUGIN_VERSION = '0.1.18'
+const PLUGIN_VERSION = '0.1.19'
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function stageLabel(stage: SessionStage): string {
@@ -158,6 +161,8 @@ function patch(patch: { enabled?: boolean; from?: string; fromEffort?: string | 
     .finally(() => set(busy, false))
 }
 
+let listSeq = 0
+let acceptanceSeq = 0
 export function setup(ctx: PanelContext) {
   void refresh(ctx.signal)
   void fetchModels(ctx.signal)
@@ -168,6 +173,7 @@ export function setup(ctx: PanelContext) {
   let statusRetryDelay = 5_000
   let statusRetryAt = Date.now() + statusRetryDelay
   let modelsRetryAt = Date.now() + 15_000
+  let sessionReady = false
   const tick = () => {
     if (ctx.signal.aborted) return
     const entry = read(status)
@@ -187,16 +193,41 @@ export function setup(ctx: PanelContext) {
       void fetchModels(ctx.signal, true)
     }
     const file = read(sessionFile)
-    plugin.request('session.status', file ? { file } : {}, { signal: ctx.signal, timeoutMs: 10_000 })
-      .then((data) => { if (!ctx.signal.aborted) set(session, { data: data as SessionStatus }) })
-      .catch((e) => { if (!ctx.signal.aborted) set(session, { error: message(e) }) })
+    if (read(followSession) && file && read(sessionList).some((row) => row.file === file)) {
+      void loadSession(file, true)
+    }
+    const seq = ++listSeq
     plugin.request('session.list', {}, { signal: ctx.signal, timeoutMs: 10_000 })
-      .then((rows) => { if (!ctx.signal.aborted) set(sessionList, rows as typeof sessionList extends never ? never : { file: string; dir: string; ageMs: number; active: boolean; title: string | null; cwd: string | null }[]) })
+      .then((rows) => {
+        if (ctx.signal.aborted || seq !== listSeq) return
+        const merged = mergeSessionRows(read(sessionList), rows as SessionRow[])
+        set(sessionList, merged)
+        if (!sessionReady && merged.length) {
+          const picked = read(sessionFile)
+          sessionReady = true
+          if (picked && merged.some((row) => row.file === picked)) {
+            // A persisted pin gets its detail immediately; no wait for the next tick.
+            void loadSession(picked)
+          } else if (!picked) {
+            const first = merged.find((row) => row.active) ?? merged[0]
+            selectSession(first.file)
+          }
+        }
+      })
       .catch(() => { /* list is best-effort */ })
-    plugin.request('acceptance.result', { repo: currentRepo() }, { signal: ctx.signal, timeoutMs: 8_000 })
-      .then((r) => { if (!ctx.signal.aborted) set(driverState, r as DriverState) })
-      .catch(() => { /* result is best-effort */ })
+    const repo = currentRepo()
+    if (repo) {
+      const resultSeq = ++acceptanceSeq
+      plugin.request('acceptance.result', { repo }, { signal: ctx.signal, timeoutMs: 8_000 })
+        .then((r) => {
+          if (!ctx.signal.aborted && resultSeq === acceptanceSeq && currentRepo() === repo) set(driverState, r as DriverState)
+        })
+        .catch(() => { /* result is best-effort */ })
+    } else if (read(driverState) !== null) {
+      set(driverState, null)
+    }
   }
+  tick()
   const timer = setInterval(tick, 3000)
   ctx.signal.addEventListener('abort', () => clearInterval(timer))
 }
@@ -300,49 +331,147 @@ function modelPicker(fid: Fid, title: string, caption: string, currentModel: str
   )
 }
 
-function fmtAge(ms: number | null): string {
-  if (ms == null) return ''
-  const s = Math.max(0, Math.round(ms / 1000))
-  if (s < 60) return `${s}s`
-  if (s < 3600) return `${Math.floor(s / 60)}m`
-  return `${Math.floor(s / 3600)}h`
+// Keep existing rows in their slots; append only sessions we have not seen.
+// Prepending new rows made the whole rail shift while a session was open.
+export function mergeSessionRows(previous: SessionRow[], next: SessionRow[]): SessionRow[] {
+  const incoming = new Map(next.map((row) => [row.file, row]))
+  const kept = previous.filter((row) => incoming.has(row.file)).map((row) => incoming.get(row.file)!)
+  const known = new Set(previous.map((row) => row.file))
+  const added = next.filter((row) => !known.has(row.file))
+  return [...kept, ...added]
+}
+
+function sessionTitle(row: SessionRow): string {
+  const title = (row.title ?? '').trim()
+  if (title) return title
+  return row.dir.split(/[\\/]/).filter(Boolean).pop() || '会话'
+}
+
+function projectName(cwd: string | null): string {
+  return cwd ? cwd.split(/[\\/]/).filter(Boolean).pop() ?? '' : ''
+}
+
+// One status request at a time for polling; a click may still start a fresh
+// read immediately. Every response is tagged with the session it belongs to,
+// so a slow answer for the previous selection can never overwrite the new one.
+let sessionSeq = 0
+let sessionBusy = false
+async function loadSession(file: string, poll = false) {
+  if (poll && sessionBusy) return
+  const seq = ++sessionSeq
+  sessionBusy = true
+  try {
+    const data = await plugin.request('session.status', { file }, { signal, timeoutMs: 10_000 })
+    if (!signal.aborted && seq === sessionSeq && read(sessionFile) === file && read(followSession)) {
+      set(session, { data: data as SessionStatus })
+    }
+  } catch (e) {
+    if (!signal.aborted && seq === sessionSeq && read(sessionFile) === file && read(followSession)) {
+      set(session, { error: message(e) })
+    }
+  } finally {
+    if (seq === sessionSeq) sessionBusy = false
+  }
+}
+
+function selectSession(file: string) {
+  const beforeRepo = currentRepo()
+  const row = read(sessionList).find((item) => item.file === file)
+  const changed = read(sessionFile) !== file
+  if (changed) set(session, null)
+  set(sessionFile, file)
+  set(followSession, true)
+  // Acceptance is scoped to a repo; do not carry another repo's verdict over.
+  if (beforeRepo !== (row?.cwd ?? undefined)) { set(reviewResult, null); set(driverState, null) }
+  void loadSession(file)
+}
+
+function toggleFollow() {
+  const next = !read(followSession)
+  set(followSession, next)
+  if (next) {
+    const file = read(sessionFile)
+    if (file && read(sessionList).some((row) => row.file === file)) void loadSession(file)
+  }
 }
 
 function sessionCard(f?: FusionState, driver: DriverState | null = null) {
   const entry = read(session)
   const rows = read(sessionList)
   const picked = read(sessionFile)
-  if (entry?.error) return <Card title="OMP 会话" description="当前会话的阶段与模型"><Text size="sm" tone="warning">{entry.error}</Text></Card>
   const s = entry?.data
   const shown = s?.file
   const current = visibleStage(s, f, driver)
+  const pickedRow = picked ? rows.find((row) => row.file === picked) : undefined
+  const fallback = rows.find((row) => row.active) ?? rows[0]
+  const query = read(sessionQuery).trim().toLowerCase()
+  const filteredRows = query
+    ? rows.filter((row) => [sessionTitle(row), projectName(row.cwd), row.file].some((value) => value.toLowerCase().includes(query)))
+    : rows
   return (
-    <Card title="OMP 会话" description="当前会话的阶段与模型">
+    <Card title="OMP 会话" description="所有会话原地更新；点击固定查看，不会自动切走">
       <Stack gap="sm">
-        {rows.length > 1 && (
-          <Select
-            label="会话"
-            value={picked ?? rows[0]?.file}
-            options={rows.slice(0, 8).map((r) => {
-              const label = ((r.title ?? r.dir.split(/[\\/]/).pop() ?? '').replace(/^[\s]+/, '').slice(0, 28)) || '会话'
-              return { value: r.file, label: `${r.active ? '● ' : ''}${label} · ${fmtAge(r.ageMs)}` }
-            })}
-            onChange={(v) => set(sessionFile, v)}
-          />
-        )}
-        {!shown && <EmptyState title="暂无 OMP 会话" description="有会话活动后，这里显示当前阶段、模型和切换记录。" icon="activity" />}
-        {shown && (
-          <Stack gap="sm">
-            <Row justify="between" align="start" gap="sm">
-              <Stack gap="none">
-                <Text size="xs" muted>当前模型</Text>
-                <Text size="sm">{s?.currentModel ?? '未知'}{s?.currentThinking ? ` · ${s.currentThinking}` : ''}</Text>
-              </Stack>
-              <Badge tone={stageTone(current.stage)}>{stageLabel(current.stage)}</Badge>
+        {rows.length > 0 && (
+          <Stack gap="xs">
+            <Row justify="between" align="center" gap="sm">
+              <Text size="xs" muted>
+                {query ? `${filteredRows.length} / ${rows.length} 个会话` : `${rows.length} 个会话`}
+                {rows.some((row) => row.active) ? ` · ${rows.filter((row) => row.active).length} 个活跃` : ''}
+              </Text>
+              {fallback && (
+                <Button size="xs" variant="ghost" disabled={picked === fallback.file} onPress={() => void selectSession(fallback.file)}>
+                  {fallback.active ? '回到活跃' : '最近会话'}
+                </Button>
+              )}
             </Row>
-            {s?.lastTool && <KeyValue items={[{ label: '最近工具', value: `${s.lastTool} · ${s.lastToolAt ? new Date(s.lastToolAt).toLocaleTimeString() : ''}` }]} />}
-            {s && s.switches.length > 0 && (
-              <Box padding="sm" radius="md" background="muted">
+            <Input label="筛选会话" labelHidden value={read(sessionQuery)} placeholder="按标题或项目筛选" onChange={(value) => set(sessionQuery, value)} />
+            {filteredRows.length > 0 ? (
+              <Box maxHeight={180} scroll="y">
+                <List>
+                  {filteredRows.map((row) => {
+                    const meta = [row.active ? '活跃' : null, projectName(row.cwd)].filter(Boolean).join(' · ')
+                    return (
+                      <ListItem
+                        key={row.file}
+                        title={sessionTitle(row)}
+                        description={meta}
+                        current={picked === row.file}
+                        onPress={() => void selectSession(row.file)}
+                      />
+                    )
+                  })}
+                </List>
+              </Box>
+            ) : <Text size="xs" muted>没有匹配的会话。</Text>}
+          </Stack>
+        )}
+        {!rows.length && !entry && <Text size="xs" muted>正在读取会话…</Text>}
+        {!rows.length && entry && <EmptyState title="暂无 OMP 会话" description="有会话活动后，这里会列出全部会话。" icon="activity" />}
+        {picked && !pickedRow && <Text size="sm" tone="warning">固定的会话已不可见；选择上面的会话，或点「最近会话」。</Text>}
+        {entry?.error && <Text size="sm" tone="warning">{entry.error}</Text>}
+        {picked && !entry && <Text size="xs" muted>正在读取会话…</Text>}
+        {picked && pickedRow && (
+          <Row justify="between" align="center" gap="sm">
+            <Text size="xs" muted>{read(followSession) ? '实时跟随；只更新下方详情' : '已暂停；显示暂停时的快照'}</Text>
+            <Button size="xs" variant="ghost" icon={read(followSession) ? 'pause' : 'play'} onPress={toggleFollow}>
+              {read(followSession) ? '暂停' : '恢复'}
+            </Button>
+          </Row>
+        )}
+        {shown && (
+          <Box height={192} scroll="y" padding="sm" radius="md" background="muted">
+            <Stack gap="sm">
+              <Row justify="between" align="start" gap="sm">
+                <Stack gap="none">
+                  <Text size="xs" muted>当前模型</Text>
+                  <Text size="sm">{s?.currentModel ?? '未知'}{s?.currentThinking ? ` · ${s.currentThinking}` : ''}</Text>
+                </Stack>
+                <Badge tone={stageTone(current.stage)}>{stageLabel(current.stage)}</Badge>
+              </Row>
+              {s?.lastTool
+                ? <KeyValue items={[{ label: '最近工具', value: `${s.lastTool} · ${s.lastToolAt ? new Date(s.lastToolAt).toLocaleTimeString() : ''}` }]} />
+                : <Text size="xs" muted>还没有工具调用记录。</Text>}
+              {s && s.switches.length > 0 ? (
                 <Stack gap="xs">
                   <Row justify="between" align="center">
                     <Text size="xs" muted>模型切换历史</Text>
@@ -355,9 +484,9 @@ function sessionCard(f?: FusionState, driver: DriverState | null = null) {
                     </Row>
                   ))}
                 </Stack>
-              </Box>
-            )}
-          </Stack>
+              ) : <Text size="xs" muted>还没有模型切换记录。</Text>}
+            </Stack>
+          </Box>
         )}
       </Stack>
     </Card>
@@ -498,6 +627,10 @@ function sessionCard(f?: FusionState, driver: DriverState | null = null) {
 								</Stack>
 							</Card>
 							)}
+						</Stack>
+					</Tab>
+					<Tab value="sessions" label="会话">
+						<Stack gap="md">
 							{sessionCard(f, read(driverState))}
 						</Stack>
 					</Tab>

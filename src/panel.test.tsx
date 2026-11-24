@@ -6,7 +6,7 @@ import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, mockHost, type TestPanel } from 'orca/testing'
 import * as panel from './panel'
-import type { OmpModel } from './protocol'
+import type { OmpModel, SessionStatus } from './protocol'
 
 const fusionRow = (i: number): OmpModel => ({
   id: `devin/fusion-claude-opus-5-high-sidekick-swe-2-${i}`,
@@ -44,9 +44,16 @@ const requests = {
 
 let mounted: TestPanel | undefined
 
+function requestFile(input: unknown): string | undefined {
+  if (!input || typeof input !== 'object' || !('file' in input)) return undefined
+  return typeof input.file === 'string' ? input.file : undefined
+}
+
 async function openPicker() {
   mounted = await mount(panel, { host: mockHost({ requests }) })
   assert.deepEqual(mounted.errors, [])
+  // The panel opens on 会话; model settings live under the Orzic tab.
+  await mounted.select({ type: 'Tabs' }, 'orzic')
   await mounted.press({ text: current })
   return mounted
 }
@@ -90,11 +97,12 @@ test('picking a filtered model writes it as the plan model', async () => {
   assert.deepEqual(writes, [{ from: 'devin/swe-2', fromEffort: null }])
 })
 
-test('Orcai exposes Orzic and 便签 as separate modules', async () => {
+test('Orcai exposes Orzic, 会话 and 便签 as separate modules', async () => {
   mounted = await mount(panel, { host: mockHost({ requests }) })
   assert.deepEqual(mounted.errors, [])
   // The panel is the Orcai container; each tab is one module.
-  assert.deepEqual(mounted.findAll({ type: 'Tab' }).map((tab) => tab.text), ['Orzic', '便签'])
+  assert.deepEqual(mounted.findAll({ type: 'Tab' }).map((tab) => tab.text), ['Orzic', '会话', '便签'])
+  await mounted.select({ type: 'Tabs' }, 'orzic')
   const images = (alt: string) => mounted!.findAll({ type: 'Image' }).filter((image) => image.props.alt === alt)
   const orzicTab = mounted.find({ type: 'Tab', text: 'Orzic' })
   const routingBadge = mounted.find({ text: '规划路由关' })
@@ -117,6 +125,61 @@ test('Orcai exposes Orzic and 便签 as separate modules', async () => {
   assert.equal(mounted.find({ text: '规划路由关' }), null)
 })
 
+test('a pinned session stays selected and can be changed by click', async () => {
+  const alphaFile = 'C:\\sessions\\alpha.jsonl'
+  const betaFile = 'C:\\sessions\\beta.jsonl'
+  const rows = [
+    { file: alphaFile, dir: 'sessions', ageMs: 1_000, active: true, title: 'Alpha', cwd: 'C:\\work\\alpha' },
+    { file: betaFile, dir: 'sessions', ageMs: 2_000, active: false, title: 'Beta', cwd: 'C:\\work\\beta' },
+  ]
+  const statusFor = (file?: string): SessionStatus => {
+    const name = (file ?? alphaFile).split(/[\\/]/).pop()!
+    const alpha = name.startsWith('alpha')
+    return {
+      file: name, ageMs: 1_000, currentModel: alpha ? 'model-alpha' : 'model-beta', currentThinking: null,
+      switches: [], lastTool: null, lastToolAt: null, stage: 'executing', stageModel: null,
+    }
+  }
+  mounted = await mount(panel, {
+    host: mockHost({
+      storage: { 'orzic.sessionFile': betaFile },
+      requests: {
+        ...requests,
+        'session.list': rows,
+        'session.status': (input) => statusFor(requestFile(input)),
+      },
+    }),
+  })
+  assert.deepEqual(mounted.errors, [])
+  await mounted.select({ type: 'Tabs' }, 'sessions')
+  await mounted.settled()
+  const currentRow = () => mounted!.findAll({ type: 'ListItem' }).filter((row) => row.props.current === true).map((row) => row.label)
+  // Alpha is the newest/active session, but the persisted pin keeps Beta in view.
+  assert.deepEqual(currentRow(), ['Beta'])
+  assert.match(mounted.find({ text: /model-beta/ })?.text ?? '', /model-beta/)
+  const statusCalls = (mounted.host.callsOf('plugin.request') as { name: string; input: unknown }[])
+    .filter((call) => call.name === 'session.status')
+  assert.ok(statusCalls.some((call) => requestFile(call.input) === betaFile))
+
+  await mounted.press({ type: 'ListItem', label: 'Alpha' })
+  assert.deepEqual(currentRow(), ['Alpha'])
+  assert.match(mounted.find({ text: /model-alpha/ })?.text ?? '', /model-alpha/)
+  const lastStatus = (mounted.host.callsOf('plugin.request') as { name: string; input: unknown }[])
+    .filter((call) => call.name === 'session.status').at(-1)
+  assert.equal(requestFile(lastStatus?.input), alphaFile)
+})
+
+test('session order keeps its slots and only appends new sessions', () => {
+  const row = (file: string, active = false) => ({ file, dir: 'sessions', ageMs: 0, active, title: file, cwd: null })
+  const alpha = row('C:\\sessions\\alpha.jsonl')
+  const beta = row('C:\\sessions\\beta.jsonl')
+  const gamma = row('C:\\sessions\\gamma.jsonl', true)
+  // The worker sorts by mtime. A flip in its answer must not move open rows.
+  assert.deepEqual(panel.mergeSessionRows([alpha, beta], [beta, alpha]).map((item) => item.file), [alpha.file, beta.file])
+  // A new session appears at the end, so the rail above it does not shift.
+  assert.deepEqual(panel.mergeSessionRows([alpha, beta], [beta, gamma, alpha]).map((item) => item.file), [alpha.file, beta.file, gamma.file])
+})
+
 test('the selected thinking level is highlighted, not a gray ghost', async () => {
   mounted = await mount(panel, {
     host: mockHost({
@@ -127,6 +190,7 @@ test('the selected thinking level is highlighted, not a gray ghost', async () =>
     }),
   })
   assert.deepEqual(mounted.errors, [])
+  await mounted.select({ type: 'Tabs' }, 'orzic')
   const buttons = (label: string) => mounted!.findAll({ type: 'Button', text: label })
   // The planner card is drawn before the executor card, so [0] is the planner
   // row and [1] the executor row. Both use the same model, so every level is
