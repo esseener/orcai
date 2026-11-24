@@ -8,6 +8,7 @@ import type { AcceptanceCfg, FusionState, ModelSwitch, OmpModel, SessionStage, S
 import { commandError, ompExecutable } from './cli'
 import { acceptanceResult, acceptanceReview, acceptanceStop } from './acceptance'
 import { createModelCatalog, MODELS_TIMEOUT_MS, parseModelRows } from './orzic-models.mjs'
+import { hostActive, isRecent, sessionIdFromFile } from './orzic-session-state.mjs'
 
 // Ship the in-session acceptance loop and detached review driver to OMP's
 // extension directory. Model routing remains owned by OMP's native prewalk.
@@ -163,7 +164,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   // pinned wrong settings. The panel now retries a rejected status request.
   orca.panels.handle('fusion.status', async () => JSON.parse(JSON.stringify(await status(orca))))
   orca.panels.handle('session.status', async (input) => sessionStatus(input as { file?: string }))
-  orca.panels.handle('session.list', async () => listSessions())
+  orca.panels.handle('session.list', async () => listSessions(orca))
   orca.panels.handle('acceptance.review', async (input) => acceptanceReview(orca, input as { repo?: string; commit?: string; from?: string; to?: string }))
   orca.panels.handle('acceptance.result', async (input) => acceptanceResult(input as { repo?: string }))
   orca.panels.handle('acceptance.stop', async (input) => acceptanceStop(input as { repo?: string; force?: boolean }))
@@ -206,15 +207,46 @@ export default function activate(orca: OrcaWorkerApi): void {
 }
 // Live session: newest session .jsonl, model/thinking switch timeline + last tool.
 const sessionsRoot = join(homedir(), '.omp', 'agent', 'sessions')
-const ACTIVE_WINDOW_MS = 120_000
-// The panel is a live workbench, not a history browser. Sessions whose file has
-// not changed for this long are treated as finished and hidden; reopening one
-// in OMP writes to it again and brings it back.
-const RECENT_WINDOW_MS = 15 * 60_000
+// A conversation stays visible for 20 minutes after its last write, so the
+// list does not turn into an archive. Real activity comes from Orca's agent
+// status, never from the file mtime.
+const RECENT_WINDOW_MS = 20 * 60_000
 
 type SessionFile = { file: string; dir: string; mtime: number }
+type HostAgentState = 'working' | 'blocked' | 'waiting' | 'done'
 
-function listSessions(): { file: string; dir: string; ageMs: number; active: boolean; recent: boolean; title: string | null; cwd: string | null; model: string | null; thinking: string | null; stage: SessionStage; lastTool: string | null; lastToolAt: string | null }[] {
+// Orca owns the live state shown in its sidebar. Read it through the host API
+// and match by the agent's own session id; titles and cwd are not unique, so
+// guessing from them would light up an unrelated historical session.
+async function activeAgents(orca: OrcaWorkerApi): Promise<{ states: Map<string, HostAgentState>; error: string | null }> {
+  const states = new Map<string, HostAgentState>()
+  if (!orca.host.has('workspace.list') || !orca.host.has('agents.list')) {
+    return { states, error: 'Orca 未提供 agent 状态 API' }
+  }
+  let workspaces
+  try {
+    ({ workspaces } = await orca.host.call('workspace.list', { includeStatus: true }))
+  } catch (e) {
+    return { states, error: e instanceof Error ? e.message : String(e) }
+  }
+  let error: string | null = null
+  for (const workspace of workspaces) {
+    const status = workspace.status
+    if (!status) continue
+    if ((status.terminalCount ?? 0) === 0 && status.state !== 'working' && status.state !== 'permission') continue
+    try {
+      const { agents } = await orca.host.call('agents.list', { workspaceId: workspace.id })
+      for (const agent of agents) {
+        if (agent.sessionId) states.set(agent.sessionId, agent.state)
+      }
+    } catch (e) {
+      error ??= e instanceof Error ? e.message : String(e)
+    }
+  }
+  return { states, error }
+}
+
+function sessionFiles(): SessionFile[] {
   let dirs: string[]
   try {
     dirs = readdirSync(sessionsRoot)
@@ -225,32 +257,43 @@ function listSessions(): { file: string; dir: string; ageMs: number; active: boo
     if (e && typeof e === 'object' && 'code' in e && e.code === 'ENOENT') return []
     throw e
   }
-  const rows: (SessionFile & { title: string | null; cwd: string | null; status: SessionStatus })[] = []
+  const rows: SessionFile[] = []
   for (const dir of dirs) {
     const dirPath = join(sessionsRoot, dir)
     try {
       for (const f of readdirSync(dirPath)) {
         if (!f.endsWith('.jsonl')) continue
         const p = join(dirPath, f)
-        try {
-          const mtime = statSync(p).mtimeMs
-          const meta = sessionMeta(p)
-          rows.push({ file: p, dir, mtime, title: meta.title, cwd: meta.cwd, status: sessionStatusFor(p) })
-        } catch { /* gone */ }
+        try { rows.push({ file: p, dir, mtime: statSync(p).mtimeMs }) } catch { /* gone */ }
       }
     } catch { /* dir may be a file or gone */ }
   }
   rows.sort((a, b) => b.mtime - a.mtime)
+  return rows
+}
+
+async function listSessions(orca: OrcaWorkerApi): Promise<{ sessions: { file: string; dir: string; ageMs: number; active: boolean; recent: boolean; sessionId: string | null; hostState: HostAgentState | null; title: string | null; cwd: string | null; model: string | null; thinking: string | null; stage: SessionStage; lastTool: string | null; lastToolAt: string | null }[]; activeError: string | null }> {
+  const { states: hostStates, error: activeError } = await activeAgents(orca)
   const now = Date.now()
-  // The worker returns every readable record; `recent` is only a marker. The
-  // panel decides what to draw, so an old file is never mistaken for deleted.
-  return rows.map((r) => ({
-    file: r.file, dir: r.dir, ageMs: now - r.mtime, active: now - r.mtime < ACTIVE_WINDOW_MS,
-    recent: now - r.mtime <= RECENT_WINDOW_MS,
-    title: r.title, cwd: r.cwd,
-    model: r.status.currentModel, thinking: r.status.currentThinking, stage: r.status.stage,
-    lastTool: r.status.lastTool, lastToolAt: r.status.lastToolAt,
-  }))
+  // The worker returns every readable record; `recent` and `active` are
+  // markers. The panel decides what to draw, so an old file is never mistaken
+  // for deleted.
+  const sessions = sessionFiles().map((r) => {
+    const meta = sessionMeta(r.file)
+    const status = sessionStatusFor(r.file)
+    const sessionId = sessionIdFromFile(r.file)
+    const hostState = sessionId ? hostStates.get(sessionId) ?? null : null
+    return {
+      file: r.file, dir: r.dir, ageMs: now - r.mtime,
+      active: hostActive(hostState),
+      recent: isRecent(r.mtime, now),
+      sessionId, hostState,
+      title: meta.title, cwd: meta.cwd,
+      model: status.currentModel, thinking: status.currentThinking, stage: status.stage,
+      lastTool: status.lastTool, lastToolAt: status.lastToolAt,
+    }
+  })
+  return { sessions, activeError }
 }
 
 const metaCache = new Map<string, { title: string | null; cwd: string | null }>()
@@ -276,13 +319,13 @@ function sessionMeta(file: string): { title: string | null; cwd: string | null }
 }
 
 function pickSession(file?: string): { file: string; mtime: number; size: number } | null {
-  const rows = listSessions()
+  const rows = sessionFiles()
   if (!rows.length) return null
   const hit = file ? rows.find((r) => r.file === file) : rows[0]
   if (!hit) return null
   // row has real mtime via ageMs round-trip; stat directly for size+fresh mtime.
   try { const st = statSync(hit.file); return { file: hit.file, mtime: st.mtimeMs, size: st.size } }
-  catch { return { file: hit.file, mtime: Date.now() - hit.ageMs, size: 0 } }
+  catch { return { file: hit.file, mtime: hit.mtime, size: 0 } }
 }
 
 const statusCache = new Map<string, { mtime: number; size: number; value: SessionStatus }>()

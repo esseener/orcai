@@ -7,7 +7,7 @@ declare module 'orca' {
   'acceptance.result': { input: { repo?: string }; output: { verdict: 'pass' | 'rework' | 'unreviewed' | 'failed' | 'no-repo' | 'none'; findings: { severity: string; file: string; line: number | null; message: string }[]; summary: string; at: string | null; round: number | null; consumed: boolean; driverAlive: boolean; driverPid: number | null } }
   'acceptance.stop': { input: { repo?: string; force?: boolean }; output: { stopped: boolean; note: string } }
     'session.status': { input: { file?: string }; output: SessionStatus }
-    'session.list': { input: {}; output: { file: string; dir: string; ageMs: number; active: boolean; recent: boolean; title: string | null; cwd: string | null; model: string | null; thinking: string | null; stage: SessionStage; lastTool: string | null; lastToolAt: string | null }[] }
+    'session.list': { input: {}; output: { sessions: { file: string; dir: string; ageMs: number; active: boolean; recent: boolean; sessionId: string | null; hostState: 'working' | 'blocked' | 'waiting' | 'done' | null; title: string | null; cwd: string | null; model: string | null; thinking: string | null; stage: SessionStage; lastTool: string | null; lastToolAt: string | null }[]; activeError: string | null } }
   }
 }
 export type FusionState = { enabled: boolean; from: string | null; fromEffort: string | null; into: string | null; intoEffort: string | null; taskPrewalk: boolean; advisor: boolean; advisorModel: string | null; advisorEffort: string | null; ocr: boolean; ocrModel: string | null; ocrEffort: string | null; rulePath: string | null; checkCmd: string | null; autoReview: boolean; autoRework: boolean; maxRework: number }

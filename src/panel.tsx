@@ -8,7 +8,7 @@ type ModelLoadState = 'idle' | 'loading' | 'ready' | 'error'
 const modelState = atom<ModelLoadState>('idle')
 const modelLoaded = atom(false)
 const modelError = atom<string | null>(null)
-type SessionRow = { file: string; dir: string; ageMs: number; active: boolean; recent: boolean; title: string | null; cwd: string | null; model: string | null; thinking: string | null; stage: SessionStage; lastTool: string | null; lastToolAt: string | null }
+type SessionRow = { file: string; dir: string; ageMs: number; active: boolean; recent: boolean; sessionId: string | null; hostState: 'working' | 'blocked' | 'waiting' | 'done' | null; title: string | null; cwd: string | null; model: string | null; thinking: string | null; stage: SessionStage; lastTool: string | null; lastToolAt: string | null }
 type ReviewResult = { verdict: string; summary: string; findings: { severity: string; file: string; line: number | null; message: string }[] }
 type DriverState = { verdict: string; summary: string; findings: { severity: string; file: string; line: number | null; message: string }[]; at: string | null; round: number | null; consumed: boolean; driverAlive: boolean; driverPid: number | null }
 type SessionListState = { state: 'idle' | 'loading' | 'ready' | 'error'; error: string | null }
@@ -121,14 +121,14 @@ async function stopAcceptance(force: boolean) {
 const busy = atom(false)
 const editing = atom<string | null>(null)
 const draft = atom<Record<string, { model?: string; effort?: string | null; search?: string }>>({})
-const PLUGIN_VERSION = '0.1.22'
+const PLUGIN_VERSION = '0.1.23'
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function stageLabel(stage: SessionStage): string {
-  return ({ planning: '主脑', executing: '执行', reviewing: '验收', reworking: '返工', idle: '空闲', unknown: '未知' } as Record<SessionStage, string>)[stage]
+  return ({ planning: '规划', executing: '执行', reviewing: '验收', reworking: '返工', idle: '空闲', unknown: '未知' } as Record<SessionStage, string>)[stage]
 }
 function stageTone(stage: SessionStage): 'accent' | 'success' | 'warning' | 'danger' | 'neutral' {
-  return ({ planning: 'accent', executing: 'success', reviewing: 'warning', reworking: 'danger', idle: 'neutral', unknown: 'neutral' } as Record<SessionStage, 'accent' | 'success' | 'warning' | 'danger' | 'neutral'>)[stage]
+  return ({ planning: 'success', executing: 'success', reviewing: 'warning', reworking: 'danger', idle: 'neutral', unknown: 'neutral' } as Record<SessionStage, 'accent' | 'success' | 'warning' | 'danger' | 'neutral'>)[stage]
 }
 function visibleStage(s: SessionStatus | undefined, f: FusionState | undefined, driver: DriverState | null): { stage: SessionStage; model: string | null } {
   if (driver?.driverAlive) {
@@ -410,11 +410,11 @@ function projectName(cwd: string | null): string {
 }
 
 function sessionsCard(rows: SessionRow[], listState: SessionListState) {
-  const visible = rows.filter((row) => row.recent !== false)
+  const visible = rows.filter((row) => row.recent || (row.hostState !== null && row.hostState !== 'done'))
   const active = visible.filter((row) => row.active).length
   const description = visible.length
-    ? `${visible.length} 个会话${active ? ` · ${active} 个活跃` : ''} · 最近 15 分钟`
-    : listState.state === 'ready' ? '最近 15 分钟没有进行中的会话' : 'OMP 会话'
+    ? `${visible.length} 个会话${active ? ` · ${active} 个活跃` : ''} · 最近 20 分钟`
+    : listState.state === 'ready' ? '最近 20 分钟没有进行中的会话' : 'OMP 会话'
   return (
     <Card title="OMP 会话" description={description}>
       <Stack gap="sm">

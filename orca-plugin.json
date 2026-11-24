@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "orzic",
   "name": "Orcai",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "description": "Orcai - plugin host for multiple modules. Orzic (Fusion) routes plan/execute models and runs acceptance out of session.",
   "engines": {
     "orca": ">=1.4.268"
@@ -25,6 +25,12 @@
   "capabilities": [
     {
       "kind": "storage:own"
+    },
+    {
+      "kind": "agent:read"
+    },
+    {
+      "kind": "workspace:read"
     }
   ]
 }
