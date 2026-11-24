@@ -138,6 +138,11 @@ test('shows recent sessions with their own model and hides old records', async (
   assert.ok(mounted.find({ text: 'Alpha' }))
   assert.ok(mounted.find({ text: 'Beta' }))
   assert.ok(mounted.find({ text: 'Delta' }))
+  // Active rows come first, newest first (Alpha, Beta); Delta is also working.
+  assert.deepEqual(
+    mounted.findAll({ type: 'Text' }).map((el) => el.text).filter((text) => ['Alpha', 'Beta', 'Delta'].includes(text)),
+    ['Alpha', 'Beta', 'Delta'],
+  )
   assert.match(mounted.find({ text: /model-alpha/ })?.text ?? '', /model-alpha · high/)
   assert.match(mounted.find({ text: /model-beta/ })?.text ?? '', /model-beta/)
   // Delta is older than the 20-minute window but is still working in Orca.
@@ -211,19 +216,6 @@ test('surfaces a live-state read failure without hiding recent sessions', async 
   await mounted.settled()
   assert.ok(mounted.find({ text: /实时活跃状态不可用.*agent:read denied/ }))
   assert.ok(mounted.find({ text: 'Alpha' }))
-})
-
-test('session order keeps every seen file in its original slot', () => {
-  const alpha = 'C:\\sessions\\alpha.jsonl'
-  const beta = 'C:\\sessions\\beta.jsonl'
-  const gamma = 'C:\\sessions\\gamma.jsonl'
-  // The worker sorts by mtime. A flip in its answer must not move open rows.
-  assert.deepEqual(panel.mergeSessionOrder([alpha, beta], [beta, alpha]), [alpha, beta])
-  // A new session appears at the end, so the rail above it does not shift.
-  assert.deepEqual(panel.mergeSessionOrder([alpha, beta], [beta, gamma, alpha]), [alpha, beta, gamma])
-  // A session that disappears for one poll keeps its slot when it returns.
-  assert.deepEqual(panel.mergeSessionOrder([alpha, beta, gamma], [alpha, gamma]), [alpha, beta, gamma])
-  assert.deepEqual(panel.mergeSessionOrder([alpha, beta, gamma], [gamma, alpha, beta]), [alpha, beta, gamma])
 })
 
 test('the selected thinking level is highlighted, not a gray ghost', async () => {

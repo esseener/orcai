@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  RECENT_WINDOW_MS, applyHostState, hostActive, isRecent, sessionIdFromFile, sessionVisible,
+  RECENT_WINDOW_MS, applyHostState, hostActive, isRecent, sessionIdFromFile, sessionVisible, sortSessions,
 } from './orzic-session-state.mjs'
 
 test('session ids come from the JSONL suffix, not titles or cwd', () => {
@@ -29,6 +29,21 @@ test('a working session stays visible past the window, a done one does not', () 
   assert.equal(sessionVisible({ recent: false, hostState: 'done' }), false)
   assert.equal(sessionVisible({ recent: false, hostState: null }), false)
   assert.equal(sessionVisible({ recent: true, hostState: null }), true)
+})
+
+test('active sessions sort first, then each group by newest activity', () => {
+  const rows = [
+    { file: 'inactive-new', active: false, ageMs: 1_000 },
+    { file: 'active-old', active: true, ageMs: 60_000 },
+    { file: 'inactive-old', active: false, ageMs: 90_000 },
+    { file: 'active-new', active: true, ageMs: 2_000 },
+  ]
+  assert.deepEqual(sortSessions(rows).map((row) => row.file), ['active-new', 'active-old', 'inactive-new', 'inactive-old'])
+  // Equal age keeps a deterministic file order.
+  assert.deepEqual(
+    sortSessions([{ file: 'b', active: true, ageMs: 1 }, { file: 'a', active: true, ageMs: 1 }]).map((row) => row.file),
+    ['a', 'b'],
+  )
 })
 
 test('a status event only changes the matching session id', () => {

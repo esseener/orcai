@@ -1,7 +1,7 @@
 import { atom, Badge, Box, Button, Card, Checkbox, EmptyState, IconButton, Image, Input, KeyValue, on, plugin, read, Row, Separator, set, Stack, Tab, Tabs, Text, Textarea, type PanelContext } from 'orca'
 import type { FusionState, OmpModel, SessionStage, SessionStatus } from './protocol'
 import { filterModelChoices, isFusionModel } from './orzic-models.mjs'
-import { RECENT_WINDOW_MINUTES, applyHostState, sessionVisible } from './orzic-session-state.mjs'
+import { RECENT_WINDOW_MINUTES, applyHostState, sessionVisible, sortSessions } from './orzic-session-state.mjs'
 
 const status = atom<{ data?: { models?: OmpModel[]; fusion: FusionState }; error?: string } | null>(null)
 const modelList = atom<OmpModel[]>([])
@@ -14,7 +14,6 @@ type ReviewResult = { verdict: string; summary: string; findings: { severity: st
 type DriverState = { verdict: string; summary: string; findings: { severity: string; file: string; line: number | null; message: string }[]; at: string | null; round: number | null; consumed: boolean; driverAlive: boolean; driverPid: number | null }
 type SessionListState = { state: 'idle' | 'loading' | 'ready' | 'error'; error: string | null }
 const sessionList = atom<SessionRow[]>([])
-const sessionOrder = atom<string[]>([])
 const sessionListState = atom<SessionListState>({ state: 'idle', error: null })
 const activeError = atom<string | null>(null)
 const reviewResults = atom<Record<string, ReviewResult>>({})
@@ -123,7 +122,7 @@ async function stopAcceptance(force: boolean) {
 const busy = atom(false)
 const editing = atom<string | null>(null)
 const draft = atom<Record<string, { model?: string; effort?: string | null; search?: string }>>({})
-const PLUGIN_VERSION = '0.1.24'
+const PLUGIN_VERSION = '0.1.25'
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function stageLabel(stage: SessionStage): string {
@@ -204,16 +203,10 @@ async function loadSessionList(sig: AbortSignal): Promise<SessionRow[] | null> {
     const response = await plugin.request('session.list', {}, { signal: sig, timeoutMs: 10_000 }) as { sessions: SessionRow[]; activeError: string | null }
     if (sig.aborted) return null
     const rows = response.sessions
-    // Keep known files in their slots and append new sessions. A deleted
-    // record simply stops appearing; a read failure never reaches this branch.
-    const order = mergeSessionOrder(read(sessionOrder), rows.map((row) => row.file))
-    set(sessionOrder, order)
-    const byFile = new Map(rows.map((row) => [row.file, row]))
-    const live = order.flatMap((file) => { const row = byFile.get(file); return row ? [row] : [] })
-    set(sessionList, live)
+    set(sessionList, rows)
     set(activeError, response.activeError)
     set(sessionListState, { state: 'ready', error: null })
-    return live
+    return rows
   } catch (e) {
     // Keep the last rows: a transient read failure is not a deleted session.
     if (!sig.aborted) set(sessionListState, { state: 'error', error: message(e) })
@@ -406,13 +399,6 @@ function modelPicker(fid: Fid, title: string, caption: string, currentModel: str
   )
 }
 
-// Keep every file we have seen, in its original slot. A session that vanishes
-// for a poll and comes back must not be appended as if it were new.
-export function mergeSessionOrder(previous: string[], current: string[]): string[] {
-  const seen = new Set(previous)
-  return [...previous, ...current.filter((file) => !seen.has(file))]
-}
-
 function sessionTitle(row: SessionRow): string {
   const title = (row.title ?? '').trim()
   if (title) return title
@@ -432,7 +418,7 @@ function sessionBadge(row: SessionRow): { label: string; tone: 'neutral' | 'acce
 }
 
 function sessionsCard(rows: SessionRow[], listState: SessionListState) {
-  const visible = rows.filter(sessionVisible)
+  const visible = sortSessions(rows.filter(sessionVisible))
   const active = visible.filter((row) => row.active).length
   const description = visible.length
     ? `${visible.length} 个会话${active ? ` · ${active} 个活跃` : ''} · 最近 ${RECENT_WINDOW_MINUTES} 分钟`

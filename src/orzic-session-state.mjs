@@ -22,6 +22,16 @@ export function sessionVisible(row) {
   return row.recent === true || (row.hostState != null && row.hostState !== 'done')
 }
 
+/** Active sessions first; each group newest first, with a stable file tie-break. */
+export function sortSessions(rows) {
+  return [...rows].sort((a, b) => {
+    if (a.active !== b.active) return a.active ? -1 : 1
+    const aa = Number.isFinite(a.ageMs) ? a.ageMs : Number.POSITIVE_INFINITY
+    const bb = Number.isFinite(b.ageMs) ? b.ageMs : Number.POSITIVE_INFINITY
+    return aa - bb || String(a.file).localeCompare(String(b.file))
+  })
+}
+
 /** Apply an Orca status event only to the row with the same agent session id. */
 export function applyHostState(row, sessionId, state) {
   if (!sessionId || row.sessionId !== sessionId) return row
