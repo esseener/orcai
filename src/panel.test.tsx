@@ -103,8 +103,10 @@ test('the selected thinking level is highlighted, not a gray ghost', async () =>
   const buttons = (label: string) => mounted!.findAll({ type: 'Button', text: label })
   // The planner card is drawn before the executor card, so [0] is the planner
   // row and [1] the executor row. Both use the same model, so every level is
-  // drawn twice; asserting the first occurrence is what keeps the check scoped.
-  const [plannerXhigh, executorXhigh] = buttons('xhigh')
+  // drawn twice; the count assertion keeps an extra rendering visible.
+  const xhighRows = buttons('xhigh')
+  assert.equal(xhighRows.length, 2, 'xhigh must be drawn in both rows')
+  const [plannerXhigh, executorXhigh] = xhighRows
   assert.equal(plannerXhigh?.props.variant, 'solid')
   assert.equal(plannerXhigh?.props.tone, 'accent')
   assert.equal(executorXhigh?.props.variant, 'ghost')
@@ -115,13 +117,10 @@ test('the selected thinking level is highlighted, not a gray ghost', async () =>
     assert.equal(rows.length, 2, `${label} must be drawn in both rows`)
     assert.equal(rows[0]?.props.variant, 'ghost', `planner ${label} must not look selected`)
     assert.equal(rows[0]?.props.tone, 'neutral', `planner ${label} must not carry the accent tone`)
-    if (label !== '默认') {
-      assert.equal(rows[1]?.props.variant, 'ghost', `executor ${label} must not look selected`)
-      assert.equal(rows[1]?.props.tone, 'neutral')
-    }
+    // The executor's own selected level is its default (`intoEffort: null`) and
+    // must be highlighted independently of the planner's xhigh.
+    const expected = label === '默认' ? { variant: 'solid', tone: 'accent' } : { variant: 'ghost', tone: 'neutral' }
+    assert.equal(rows[1]?.props.variant, expected.variant, `executor ${label} variant`)
+    assert.equal(rows[1]?.props.tone, expected.tone, `executor ${label} tone`)
   }
-  // The executor's own selected level is its default (`intoEffort: null`) and
-  // must be highlighted independently of the planner's xhigh.
-  const [plannerDefault] = buttons('默认')
-  assert.equal(plannerDefault?.props.variant, 'ghost')
 })
