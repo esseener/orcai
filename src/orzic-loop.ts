@@ -93,8 +93,10 @@ export default function (pi: Pi): void {
   const pinCwds = new Map<string, string>()
   const planning = new Map<string, { cwd: string }>()
   const executing = new Set<string>()
-  const pendingPlanWrites = new Map<string, { session: string; cwd: string; target: string; content: string | null }>()
-  const pendingWrites = new Map<string, { session: string; isPlan: boolean; shell: boolean }>()
+  const pendingPlanWrites = new Map<string, { session: string; turn: number; cwd: string; target: string; content: string | null }>()
+  const pendingWrites = new Map<string, { session: string; turn: number; isPlan: boolean; shell: boolean }>()
+  const turnBySession = new Map<string, number>()
+  let turnSeq = 0
 
   const pinSession = (ctx?: PiCtx): string => {
     try {
@@ -131,12 +133,13 @@ export default function (pi: Pi): void {
 
   const useModel = (ctx: PiCtx, selector: string | null): Promise<boolean> => {
     const run = async (): Promise<boolean> => {
-      const target = modelBySelector(ctx, selector)
-      if (!target || typeof pi.setModel !== 'function') return false
       try {
-        // setModel resolves false when the provider has no API key; treating
-        // that as success would run the turn on the previous model.
-        if (await pi.setModel(target) === false) return false
+        const target = modelBySelector(ctx, selector)
+        if (!target || typeof pi.setModel !== 'function') return false
+        // OMP resolves false when the provider has no API key. Anything other
+        // than true (false, undefined) means the switch did not happen; the
+        // registry read above is also inside this try because it can throw.
+        if (await pi.setModel(target) !== true) return false
         const level = effortOf(selector)
         if (level && typeof pi.setThinkingLevel === 'function') {
           const s = pi.setThinkingLevel(level)
@@ -185,6 +188,7 @@ export default function (pi: Pi): void {
     pendingWrites.clear()
     pendingPlanWrites.clear()
     wroteSessions.delete(f)
+    turnBySession.set(f, ++turnSeq)
     const cfg = readCfg()
     if (!cfg.autoRoute || process.env.ORZIC_DRIVER || !cfg.planner) return
     const ok = await useModel(ctx, cfg.planner)
@@ -195,6 +199,7 @@ export default function (pi: Pi): void {
   pi.on('before_agent_start', async (e, ctx) => {
     const f = pinSession(ctx)
     if (!f) return
+    turnBySession.set(f, ++turnSeq)
     const cfg = readCfg()
     if (process.env.ORZIC_DRIVER) return
     if (!cfg.autoRoute) { planning.delete(f); executing.delete(f); return }
@@ -235,10 +240,11 @@ export default function (pi: Pi): void {
     const input = e?.input ?? {}
     const target = String(input.path ?? input.file_path ?? input.file ?? '')
     const plan = f ? planning.get(f) : undefined
+    const turn = f ? turnBySession.get(f) ?? 0 : 0
     if (!plan) {
-      if (f && WRITE_TOOLS.has(name) && e.toolCallId) {
+      if (f && executing.has(f) && WRITE_TOOLS.has(name) && e.toolCallId) {
         const shell = name === 'bash' || name === 'eval'
-        pendingWrites.set(e.toolCallId, { session: f, isPlan: !shell && MUTATING.has(name) && isPlanTarget(target), shell })
+        pendingWrites.set(e.toolCallId, { session: f, turn, isPlan: !shell && MUTATING.has(name) && isPlanTarget(target), shell })
       }
       return
     }
@@ -251,31 +257,33 @@ export default function (pi: Pi): void {
         content = String(input.content ?? '')
         if (!content.trim()) return { block: true, reason: '计划内容为空；请先把完整计划写入 PLAN.md。' }
       }
-      pendingWrites.set(e.toolCallId, { session: f, isPlan: true, shell: false })
+      pendingWrites.set(e.toolCallId, { session: f, turn, isPlan: true, shell: false })
       // Do not switch here: the tool may still fail or be cancelled. The
       // matching tool_execution_end decides, and agent_end never approves a
       // historical PLAN.md.
-      pendingPlanWrites.set(e.toolCallId, { session: f, cwd: ctx.cwd, target, content })
+      pendingPlanWrites.set(e.toolCallId, { session: f, turn, cwd: ctx.cwd, target, content })
     }
   })
 
   pi.on('tool_execution_end', async (e, ctx) => {
     if (!e.toolCallId) return
+    const f = pinSession(ctx)
+    const turn = f ? turnBySession.get(f) ?? -1 : -1
     const write = pendingWrites.get(e.toolCallId)
     if (write) {
       pendingWrites.delete(e.toolCallId)
-      // A nonzero bash/eval exit does not prove the side effect was absent: the
-      // command may have committed first, then failed a test. Only structured
-      // edit/write tools treat isError as "nothing happened".
-      const mayHaveWritten = write.shell || e.isError !== true
-      if (mayHaveWritten && write.session === pinSession(ctx) && !write.isPlan) wroteSessions.add(write.session)
+      // A missing isError is not a success. A nonzero bash/eval exit still
+      // counts because the command may have committed before failing; only
+      // structured edit/write tools treat isError as "nothing happened".
+      const completed = typeof e.isError === 'boolean'
+      const mayHaveWritten = write.shell ? completed : e.isError === false
+      if (mayHaveWritten && write.session === f && write.turn === turn && !write.isPlan) wroteSessions.add(write.session)
     }
     const pending = pendingPlanWrites.get(e.toolCallId)
     if (!pending) return
     pendingPlanWrites.delete(e.toolCallId)
-    if (e.isError === true) { boot(`plan write failed session=${pending.session}`); return }
-    const f = pinSession(ctx)
-    if (pending.session !== f || !planning.has(f)) return
+    if (pending.session !== f || pending.turn !== turn || !planning.has(f)) return
+    if (e.isError !== false) { boot(`plan write not confirmed session=${pending.session}`); return }
     let content = pending.content
     if (content === null) {
       const file = planFilePath(pending.cwd, pending.target)
@@ -286,18 +294,16 @@ export default function (pi: Pi): void {
       ctx.ui?.notify?.('Orzic: PLAN.md 为空或读不到，保持规划阶段。', 'warning')
       return
     }
+    if (!writePlan(ctx, content)) {
+      ctx.ui?.notify?.('Orzic: 计划快照写入失败，保持规划阶段。', 'warning')
+      boot(`plan snapshot failed session=${f}`)
+      return
+    }
     const selector = readCfg().executor
     const ok = await useModel(ctx, selector)
     boot(`handoff session=${f} selector=${selector} ok=${ok}`)
     if (!ok) {
       ctx.ui?.notify?.(`Orzic: 执行模型不可用 ${selector}`, 'warning')
-      ctx.abort?.()
-      return
-    }
-    if (!writePlan(ctx, content)) {
-      ctx.ui?.notify?.('Orzic: 计划快照写入失败，保持规划阶段。', 'warning')
-      boot(`plan snapshot failed session=${f}`)
-      await useModel(ctx, readCfg().planner)
       ctx.abort?.()
       return
     }
@@ -308,6 +314,11 @@ export default function (pi: Pi): void {
   pi.on('agent_end', (e, ctx) => {
     if (e?.willContinue === true) return
     const self = pinSession(ctx)
+    if (self) {
+      turnBySession.delete(self)
+      for (const [id, w] of pendingWrites) if (w.session === self) pendingWrites.delete(id)
+      for (const [id, p] of pendingPlanWrites) if (p.session === self) pendingPlanWrites.delete(id)
+    }
     const acc = readCfg()
     const agentRootDir = process.env.ORZIC_AGENT_DIR || join(homedir(), '.omp', 'agent')
     const log = (m: string) => { try { mkdirSync(agentRootDir, { recursive: true }); writeFileSync(join(agentRootDir, 'orzic-loop.log'), `${new Date().toISOString()} ${m}\n`, { flag: 'a' }) } catch { /* best effort */ } }

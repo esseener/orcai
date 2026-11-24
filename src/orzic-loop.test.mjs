@@ -35,7 +35,9 @@ const setup = (overrides = {}, models = [{ provider: 'planner', id: 'plan' }, { 
       await new Promise((resolve) => setTimeout(resolve, 5))
       const selector = `${model.provider}/${model.id}`
       if (options.deny?.includes(selector)) return false
+      if (options.undefinedFor?.includes(selector)) return undefined
       setModels.push(selector)
+      return true
     },
     setThinkingLevel: (level) => { levels.push(level) },
   }
@@ -67,6 +69,11 @@ const completePlanWrite = async (env, ctx, { content = '# PLAN', id = 'call-1', 
 const completeWrite = async (env, ctx, { id = 'w-1', toolName = 'write', path = 'src/a.ts', isError = false } = {}) => {
   await env.fire('tool_call', { toolCallId: id, toolName, input: { path, content: 'x' } }, ctx)
   await env.fire('tool_execution_end', { toolCallId: id, toolName, isError, result: {} }, ctx)
+}
+
+const enterExecution = async (env, ctx, id = 'plan-1') => {
+  await env.fire('before_agent_start', { prompt: '重构验收循环，拆解成步骤再实现' }, ctx)
+  await completePlanWrite(env, ctx, { id })
 }
 
 test('session_start: shows the planner model by default', async () => {
@@ -132,7 +139,7 @@ test('an executor that cannot be applied aborts and keeps planning', async () =>
   await env.fire('before_agent_start', { prompt: '重构验收循环，拆解成步骤再实现' }, ctx)
   await completePlanWrite(env, ctx)
   assert.equal(env.aborts.length, 1)
-  assert.equal(env.plans().length, 0)
+  assert.equal(env.plans().length, 1)
   const bash = await env.fire('tool_call', { toolCallId: 'x2', toolName: 'bash', input: { command: 'ls' } }, ctx)
   assert.equal(bash?.block, true)
 })
@@ -183,6 +190,64 @@ test('a missing planner aborts instead of running on the current model', async (
   const env = setup({ planner: null })
   const ctx = env.ctxFor(join(env.agent, 'sessions', 'a6.jsonl'))
   await assert.rejects(env.fire('before_agent_start', { prompt: '审查并做计划' }, ctx), /未配置规划模型/)
+  assert.equal(env.aborts.length, 1)
+  assert.deepEqual(env.setModels, [])
+})
+
+test('a PLAN.md completion without isError does not hand off', async () => {
+  const env = setup()
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'a2m.jsonl'))
+  await env.fire('before_agent_start', { prompt: '重构验收循环，拆解成步骤再实现' }, ctx)
+  await env.fire('tool_call', { toolCallId: 'noerr', toolName: 'write', input: { path: 'PLAN.md', content: '# PLAN' } }, ctx)
+  await env.fire('tool_execution_end', { toolCallId: 'noerr', toolName: 'write', result: {} }, ctx)
+  assert.deepEqual(env.setModels, ['planner/plan'])
+  assert.equal(env.plans().length, 0)
+})
+
+test('a PLAN.md completion from a previous turn cannot hand off a new task', async () => {
+  const env = setup()
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'a2t.jsonl'))
+  await env.fire('before_agent_start', { prompt: '重构验收循环，拆解成步骤再实现' }, ctx)
+  await env.fire('tool_call', { toolCallId: 'stale', toolName: 'write', input: { path: 'PLAN.md', content: '# OLD' } }, ctx)
+  await env.fire('before_agent_start', { prompt: '再审查一下整个项目，做个计划' }, ctx)
+  await env.fire('tool_execution_end', { toolCallId: 'stale', toolName: 'write', isError: false, result: {} }, ctx)
+  assert.deepEqual(env.setModels, ['planner/plan', 'planner/plan'])
+  assert.equal(env.plans().length, 0)
+})
+
+test('a write without an explicit execution phase does not spawn review', async () => {
+  const env = setup()
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'e6.jsonl'))
+  await env.fire('agent_start', {}, ctx)
+  await completeWrite(env, ctx)
+  await env.fire('agent_end', { willContinue: false }, ctx)
+  assert.equal(existsSync(join(env.agent, 'spawn.json')), false)
+})
+
+test('a write completion without isError does not spawn review', async () => {
+  const env = setup()
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'e7.jsonl'))
+  await env.fire('agent_start', {}, ctx)
+  await enterExecution(env, ctx)
+  await env.fire('tool_call', { toolCallId: 'noerr-w', toolName: 'write', input: { path: 'src/a.ts', content: 'x' } }, ctx)
+  await env.fire('tool_execution_end', { toolCallId: 'noerr-w', toolName: 'write', result: {} }, ctx)
+  await env.fire('agent_end', { willContinue: false }, ctx)
+  assert.equal(existsSync(join(env.agent, 'spawn.json')), false)
+})
+
+test('a throwing model registry aborts the turn', async () => {
+  const env = setup()
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'a7.jsonl'))
+  ctx.modelRegistry.getAvailable = () => { throw new Error('registry unavailable') }
+  await assert.rejects(env.fire('before_agent_start', { prompt: '审查并做计划' }, ctx), /规划模型不可用/)
+  assert.equal(env.aborts.length, 1)
+  assert.deepEqual(env.setModels, [])
+})
+
+test('an undefined setModel result aborts the turn', async () => {
+  const env = setup({}, undefined, { undefinedFor: ['planner/plan'] })
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'a8.jsonl'))
+  await assert.rejects(env.fire('before_agent_start', { prompt: '审查并做计划' }, ctx), /规划模型不可用/)
   assert.equal(env.aborts.length, 1)
   assert.deepEqual(env.setModels, [])
 })
@@ -248,6 +313,7 @@ test('agent_end: a completed write turn spawns the driver exactly once', async (
   const env = setup()
   const ctx = env.ctxFor(join(env.agent, 'sessions', 'e.jsonl'))
   await env.fire('agent_start', {}, ctx)
+  await enterExecution(env, ctx)
   await completeWrite(env, ctx)
   await env.fire('agent_end', { willContinue: false }, ctx)
   assert.equal(existsSync(join(env.agent, 'spawn.json')), true)
@@ -270,6 +336,7 @@ test('agent_end: a failed bash still spawns review because it may have committed
   const env = setup()
   const ctx = env.ctxFor(join(env.agent, 'sessions', 'e5.jsonl'))
   await env.fire('agent_start', {}, ctx)
+  await enterExecution(env, ctx)
   await env.fire('tool_call', { toolCallId: 'sh-1', toolName: 'bash', input: { command: 'git commit -m wip && npm test' } }, ctx)
   await env.fire('tool_execution_end', { toolCallId: 'sh-1', toolName: 'bash', isError: true, result: {} }, ctx)
   await env.fire('agent_end', { willContinue: false }, ctx)
@@ -280,6 +347,7 @@ test('agent_end: a failed write does not spawn review', async () => {
   const env = setup()
   const ctx = env.ctxFor(join(env.agent, 'sessions', 'e3.jsonl'))
   await env.fire('agent_start', {}, ctx)
+  await enterExecution(env, ctx)
   await completeWrite(env, ctx, { isError: true })
   await env.fire('agent_end', { willContinue: false }, ctx)
   assert.equal(existsSync(join(env.agent, 'spawn.json')), false)
