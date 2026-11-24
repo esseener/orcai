@@ -80,7 +80,7 @@ const run = (args, timeout) => new Promise((res) => {
   let out = '', serr = ''
   c.stdout.on('data', (d) => { out += d })
   c.stderr.on('data', (d) => { serr += d })
-  const timer = setTimeout(() => { try { c.kill('SIGKILL') } catch {} }, timeout)
+  const timer = setTimeout(() => { killTree(c) }, timeout)
   c.on('error', (e) => { clearTimeout(timer); res({ out, err: String(e).slice(0, 300) }) })
   c.on('close', (code, signal) => { clearTimeout(timer); if (currentChild === c) currentChild = null; res({ out, err: code === 0 ? null : (serr || `exit ${code ?? signal ?? '?'}`).slice(0, 300) }) })
 })
@@ -123,8 +123,9 @@ const planFor = () => {
   } catch { return { text: '', digest: 'none' } }
 }
 
+const judgeModel = (acc) => acc.ocrModel || '@default'
 const judge = async (diff, acc, plan) => {
-  const model = acc.ocrModel || 'openai-codex/gpt-6.2-sol'
+  const model = judgeModel(acc)
   const planBlock = plan.text ? `\n已批准的计划(实现须与之一致,偏离即 finding):\n${plan.text}\n` : ''
   const prompt = `你是代码验收评审。按规则审以下 git diff,只输出 JSON(无其他文字):{"verdict":"pass|rework","findings":[{"severity":"low|medium|high|blocker","file":"","line":0,"message":""}]}。规则:${ruleFor(acc)}${planBlock}\ndiff:\n${diff.slice(0, 120000)}`
   const { out, err } = await run(['--model', model, '--mode', 'json', '--no-session', '--no-extensions', '--no-prewalk', prompt], 280_000)
@@ -186,7 +187,7 @@ try {
     // a new/changed checkCmd is a different review, so an old PASS can never
     // bypass a freshly configured failing gate.
     const plan = planFor()
-    const dedupKey = sha ? `${sha}@@${acc.ocrModel || 'openai-codex/gpt-6.2-sol'}@@${ruleFor(acc)}@@${acc.checkCmd || ''}@@${plan.digest}` : ''
+    const dedupKey = sha ? `${sha}@@${judgeModel(acc)}@@${ruleFor(acc)}@@${acc.checkCmd || ''}@@${plan.digest}` : ''
     const prev = (() => { try { return JSON.parse(readFileSync(REVIEW, 'utf8')) } catch { return null } })()
     // Deterministic gate BEFORE dedup AND before the paid judge: a gate is a
     // fresh review surface, so it must run even when the revision was already

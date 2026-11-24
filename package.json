@@ -2,6 +2,6 @@
   "name": "orzic",
   "version": "0.1.2",
   "private": true,
-  "scripts": { "typecheck": "tsc -p ." },
+  "scripts": { "typecheck": "tsc -p .", "smoke:omp": "node tools/smoke-omp.mjs" },
   "devDependencies": { "@types/node": "24.13.6", "typescript": "5.9.3" }
 }

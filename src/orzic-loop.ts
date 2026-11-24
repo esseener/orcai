@@ -94,6 +94,7 @@ export default function (pi: Pi): void {
   const planning = new Map<string, { cwd: string }>()
   const executing = new Set<string>()
   const pendingPlanWrites = new Map<string, { session: string; cwd: string; target: string; content: string | null }>()
+  const pendingWrites = new Map<string, { session: string; isPlan: boolean }>()
 
   const pinSession = (ctx?: PiCtx): string => {
     try {
@@ -158,9 +159,9 @@ export default function (pi: Pi): void {
     /^local:\/\//i.test(target) ? target : isAbsolute(target) ? target : join(cwd, target)
 
   const planPath = (key: string): string => join(agentRoot(), `orzic-plan-${key}.json`)
-  const writePlan = (ctx: PiCtx, content: string): void => {
+  const writePlan = (ctx: PiCtx, content: string): boolean => {
     const text = String(content ?? '')
-    if (!text.trim()) return
+    if (!text.trim()) return false
     try {
       mkdirSync(agentRoot(), { recursive: true })
       writeFileSync(planPath(repoKey(ctx.cwd)), JSON.stringify({
@@ -172,7 +173,8 @@ export default function (pi: Pi): void {
         digest: createHash('sha256').update(text).digest('hex'),
         at: new Date().toISOString(),
       }, null, 2), 'utf8')
-    } catch { /* best effort */ }
+      return true
+    } catch { return false }
   }
 
   pi.on('session_start', async (_e, ctx) => {
@@ -180,7 +182,9 @@ export default function (pi: Pi): void {
     boot(`session_start sf=${f}`)
     planning.delete(f)
     executing.delete(f)
+    pendingWrites.clear()
     pendingPlanWrites.clear()
+    wroteSessions.delete(f)
     const cfg = readCfg()
     if (!cfg.autoRoute || process.env.ORZIC_DRIVER || !cfg.planner) return
     const ok = await useModel(ctx, cfg.planner)
@@ -210,6 +214,7 @@ export default function (pi: Pi): void {
     planning.set(f, { cwd: ctx.cwd })
     if (!cfg.planner) {
       ctx.ui?.notify?.('Orzic: 未配置规划模型，本轮停止。', 'warning')
+      ctx.abort?.()
       throw new Error('Orzic: 未配置规划模型')
     }
     const ok = await useModel(ctx, cfg.planner)
@@ -229,9 +234,13 @@ export default function (pi: Pi): void {
     const name = e?.toolName ?? ''
     const input = e?.input ?? {}
     const target = String(input.path ?? input.file_path ?? input.file ?? '')
-    if (f && WRITE_TOOLS.has(name)) wroteSessions.add(f)
     const plan = f ? planning.get(f) : undefined
-    if (!plan) return
+    if (!plan) {
+      if (f && WRITE_TOOLS.has(name) && e.toolCallId) {
+        pendingWrites.set(e.toolCallId, { session: f, isPlan: MUTATING.has(name) && isPlanTarget(target) })
+      }
+      return
+    }
     if (name === 'bash' || name === 'eval') return { block: true, reason: '规划阶段只读；计划完成后会自动切换到执行模型。' }
     if (name === 'write' || name === 'edit' || name === 'ast_edit' || name === 'notebook') {
       if (!isPlanTarget(target)) return { block: true, reason: '规划阶段只允许写 PLAN.md；先完成计划。' }
@@ -241,6 +250,7 @@ export default function (pi: Pi): void {
         content = String(input.content ?? '')
         if (!content.trim()) return { block: true, reason: '计划内容为空；请先把完整计划写入 PLAN.md。' }
       }
+      pendingWrites.set(e.toolCallId, { session: f, isPlan: true })
       // Do not switch here: the tool may still fail or be cancelled. The
       // matching tool_execution_end decides, and agent_end never approves a
       // historical PLAN.md.
@@ -250,6 +260,11 @@ export default function (pi: Pi): void {
 
   pi.on('tool_execution_end', async (e, ctx) => {
     if (!e.toolCallId) return
+    const write = pendingWrites.get(e.toolCallId)
+    if (write) {
+      pendingWrites.delete(e.toolCallId)
+      if (e.isError !== true && write.session === pinSession(ctx) && !write.isPlan) wroteSessions.add(write.session)
+    }
     const pending = pendingPlanWrites.get(e.toolCallId)
     if (!pending) return
     pendingPlanWrites.delete(e.toolCallId)
@@ -274,7 +289,13 @@ export default function (pi: Pi): void {
       ctx.abort?.()
       return
     }
-    writePlan(ctx, content)
+    if (!writePlan(ctx, content)) {
+      ctx.ui?.notify?.('Orzic: 计划快照写入失败，保持规划阶段。', 'warning')
+      boot(`plan snapshot failed session=${f}`)
+      await useModel(ctx, readCfg().planner)
+      ctx.abort?.()
+      return
+    }
     planning.delete(f)
     executing.add(f)
   })

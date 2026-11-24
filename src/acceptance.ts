@@ -79,7 +79,7 @@ const ompJudge = (cwd: string, acc: AcceptanceCfg | null, commit?: string, from?
     const { out: diff, err: diffErr } = await gitDiff(cwd, commit, from, to)
     if (diffErr) return resolve({ verdict: 'failed', findings: [], summary: `git diff 失败:${diffErr}` })
     if (!diff.trim()) return resolve({ verdict: 'unreviewed', findings: [], summary: '无 diff' })
-    const model = acc?.ocrModel ?? 'openai-codex/gpt-6.2-sol'
+    const model = acc?.ocrModel ?? '@default'
     const rule = ruleFor(cwd, acc?.rulePath ?? null)
     const plan = planFor(cwd)
     const planBlock = plan ? `\n已批准的计划(实现须与之一致,偏离即 finding):\n${plan}\n` : ''

@@ -66,6 +66,7 @@ orca plugin open local.orzic --panel orzic --json
 ```powershell
 npm run typecheck
 node --test src/orzic-loop.test.mjs src/orzic-driver.test.mjs src/orzic-verdict.test.mjs src/orzic-models.test.mjs
+npm run smoke:omp
 ```
 
 ## 验证记录（本次路由返工）
@@ -95,6 +96,28 @@ node --test src/orzic-loop.test.mjs src/orzic-driver.test.mjs src/orzic-verdict.
 | `src/orzic-lock.mjs` | `wx` 原子锁 + heartbeat + stale(10min)回收 |
 | `src/orzic-session.mjs` | Session pin 解析:权威 `ORZIC_SESSION_FILE` 路径存在且 cwd 匹配 → `exact`,否则 `scan`(只评审) |
 | `src/orzic-stub-omp.mjs` | 测试 stub:录 `orzic-stub-calls.jsonl`,按 `ORZIC_STUB_MODE` 返回 verdict;`ORZIC_STUB_STOP_ON_INJECT` 在 `-r` 里写 stop flag 测 mid-run 截停 |
+| `tools/smoke-omp.mjs` | OMP 升级兼容 smoke:隔离目录真实启动 OMP,验证扩展加载、规划路由和实际应答模型;失败退出非零 |
+
+## OMP 升级兼容性
+
+当前验证版本 **OMP 19.1.1**。插件不 import OMP 源码，编译期没有耦合；但运行时依赖下面这些契约，OMP 大版本升级**不保证**兼容：
+
+- 扩展事件：`session_start`、`before_agent_start`、`tool_call`、`tool_execution_end`、`agent_end` 及其字段（`prompt`、`toolCallId`、`input`、`isError`、`willContinue`）
+- 扩展 API：`pi.setModel()` 返回 `boolean`、`ctx.abort()`、`ctx.sessionManager.getSessionFile()`、`ctx.modelRegistry.getAvailable()`
+- CLI：`omp -r`、`--mode json`、`--model @default`、`--no-session`、`--no-prewalk`、`omp models ls`、`omp config list/set`
+- 会话 JSONL：面板读取 `model_change`、`message` 和工具事件；字段改名会让会话卡失效
+
+升级后先跑：
+
+```powershell
+npm run typecheck
+node --test src/*.test.mjs
+npm run smoke:omp
+```
+
+`smoke:omp` 会用隔离临时目录真实启动 OMP，验证扩展能加载、`before_agent_start` 能收到 prompt、规划模型实际应答（消耗一次短模型调用）。可用 `ORZIC_SMOKE_PLANNER` / `ORZIC_SMOKE_EXECUTOR` / `ORZIC_OMP_BIN` 覆盖。任一路由契约改形，smoke 会失败。
+
+失败时插件保持 **fail closed**：路由不降级到其他模型，验收只会写 `failed`/`unreviewed`，不会静默 `pass`。需要冻结工作流时固定 OMP 版本，升级前在分支上跑完整 smoke。
 
 ## 已知边界
 
@@ -102,4 +125,5 @@ node --test src/orzic-loop.test.mjs src/orzic-driver.test.mjs src/orzic-verdict.
 - `omp -r` 注入的是**当前 OMP session 文件**;同一 cwd 多个会话时只认 `ORZIC_SESSION_FILE` pin,pin 失败降级为 review-only 而不是猜。由 driver 启动的 `omp -r` 返工轮带 `ORZIC_DRIVER=1`，按设计跳过规划/执行路由。
 - Driver 只读捕获时的 `HEAD~1..HEAD`;仅写文件但未提交时即使调用受识别工具触发 hook,也可能评审旧 HEAD 的提交差异;空提交没有可评审 diff。首次验证必须让 OMP 在本轮结束前创建新的非空 commit。
 - `prompt_submit` 不再发任何消息：回喂只走 driver 的 `omp -r`;会话内注入会和 driver 撞窗口、还可能把旧 verdict 喂给同 cwd 的兄弟会话。
+- **阶段只在进程内**:规划/执行状态保存在扩展内存;OMP 重启或手动 `omp -r` 后第一条消息重新规划。driver 自己的 `omp -r` 带 `ORZIC_DRIVER=1`,跳过路由并显式 `--model @default`,不受此影响。
 - verdict/lock/stop 文件按仓库分名(`orzic-review-<key>` 等):多 repo 可并发跑 driver。同一 cwd 下两个会话仍只认 `ORZIC_SESSION_FILE` pin 的那一个;`acceptance.result/stop` 依赖面板给出正确 `repo`。
