@@ -121,7 +121,7 @@ async function stopAcceptance(force: boolean) {
 const busy = atom(false)
 const editing = atom<string | null>(null)
 const draft = atom<Record<string, { model?: string; effort?: string | null; search?: string }>>({})
-const PLUGIN_VERSION = '0.1.20'
+const PLUGIN_VERSION = '0.1.21'
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function stageLabel(stage: SessionStage): string {
@@ -412,7 +412,7 @@ function projectName(cwd: string | null): string {
 function sessionsCard(rows: SessionRow[], listState: SessionListState) {
   const active = rows.filter((row) => row.active).length
   return (
-    <Card title="OMP 会话" description={rows.length ? `${rows.length} 个会话${active ? ` · ${active} 个活跃` : ''}；记录原地更新` : '全部会话按记录顺序显示'}>
+    <Card title="OMP 会话" description={rows.length ? `${rows.length} 个会话${active ? ` · ${active} 个活跃` : ''} · 最近 15 分钟` : '最近 15 分钟没有进行中的会话'}>
       <Stack gap="sm">
         {listState.state === 'error' && rows.length > 0 && (
           <Text size="xs" tone="warning">列表刷新失败：{listState.error}（保留上次结果，下个周期重试）</Text>
@@ -424,7 +424,7 @@ function sessionsCard(rows: SessionRow[], listState: SessionListState) {
           </Stack>
         )}
         {rows.length === 0 && listState.state === 'ready' && (
-          <EmptyState title="暂无 OMP 会话" description="有会话活动后，这里会列出全部会话。" icon="activity" />
+          <EmptyState title="暂无进行中的会话" description="在 OMP 里继续一个会话后，它会自动出现在这里。" icon="activity" />
         )}
         {rows.length === 0 && (listState.state === 'idle' || listState.state === 'loading') && (
           <Text size="xs" muted>正在读取会话…</Text>

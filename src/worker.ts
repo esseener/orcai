@@ -207,6 +207,10 @@ export default function activate(orca: OrcaWorkerApi): void {
 // Live session: newest session .jsonl, model/thinking switch timeline + last tool.
 const sessionsRoot = join(homedir(), '.omp', 'agent', 'sessions')
 const ACTIVE_WINDOW_MS = 120_000
+// The panel is a live workbench, not a history browser. Sessions whose file has
+// not changed for this long are treated as finished and hidden; reopening one
+// in OMP writes to it again and brings it back.
+const RECENT_WINDOW_MS = 15 * 60_000
 
 type SessionFile = { file: string; dir: string; mtime: number }
 
@@ -238,12 +242,14 @@ function listSessions(): { file: string; dir: string; ageMs: number; active: boo
   }
   rows.sort((a, b) => b.mtime - a.mtime)
   const now = Date.now()
-  return rows.map((r) => ({
-    file: r.file, dir: r.dir, ageMs: now - r.mtime, active: now - r.mtime < ACTIVE_WINDOW_MS,
-    title: r.title, cwd: r.cwd,
-    model: r.status.currentModel, thinking: r.status.currentThinking, stage: r.status.stage,
-    lastTool: r.status.lastTool, lastToolAt: r.status.lastToolAt,
-  }))
+  return rows
+    .filter((r) => now - r.mtime <= RECENT_WINDOW_MS)
+    .map((r) => ({
+      file: r.file, dir: r.dir, ageMs: now - r.mtime, active: now - r.mtime < ACTIVE_WINDOW_MS,
+      title: r.title, cwd: r.cwd,
+      model: r.status.currentModel, thinking: r.status.currentThinking, stage: r.status.stage,
+      lastTool: r.status.lastTool, lastToolAt: r.status.lastToolAt,
+    }))
 }
 
 const metaCache = new Map<string, { title: string | null; cwd: string | null }>()
