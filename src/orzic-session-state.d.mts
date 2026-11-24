@@ -12,3 +12,7 @@ export function applyHostState<T extends { sessionId: string | null; hostState: 
   sessionId: string | null,
   state: HostAgentState,
 ): T
+export function mergeHostOverrides<T extends { sessionId: string | null; hostState: HostAgentState | null; active: boolean }>(
+  rows: readonly T[],
+  overrides: Map<string, HostAgentState>,
+): T[]

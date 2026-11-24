@@ -18,7 +18,7 @@
 
 ## 版本与发布
 
-当前版本 **0.1.26**，见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **0.1.27**，见 [CHANGELOG.md](CHANGELOG.md)。
 
 版本号同时维护在四处：
 
@@ -36,7 +36,7 @@ npm run typecheck
 npm test
 npm run smoke:omp
 # 2. 提交后打标签
-git tag -a v0.1.26 -m "v0.1.26"
+git tag -a v0.1.27 -m "v0.1.27"
 ```
 
 ## 面板模块

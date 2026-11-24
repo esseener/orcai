@@ -220,16 +220,19 @@ async function activeAgents(orca: OrcaWorkerApi): Promise<{ states: Map<string, 
     return { states, error: 'Orca 未提供 agent 状态 API' }
   }
   let workspaces
+  let error: string | null = null
   try {
-    ({ workspaces } = await orca.host.call('workspace.list', { includeStatus: true }))
+    const result = await orca.host.call('workspace.list', { includeStatus: true })
+    workspaces = result.workspaces
+    if (result.truncated) error = 'Orca 工作区列表被截断'
+    else if (result.statusTruncated) error = 'Orca 工作区状态被截断'
   } catch (e) {
     return { states, error: e instanceof Error ? e.message : String(e) }
   }
-  let error: string | null = null
   for (const workspace of workspaces) {
     const status = workspace.status
-    if (!status) continue
-    if ((status.terminalCount ?? 0) === 0 && status.state !== 'working' && status.state !== 'permission') continue
+    // A status-less workspace may still own a terminal; never skip it.
+    if (status && (status.terminalCount ?? 0) === 0 && status.state !== 'working' && status.state !== 'permission') continue
     try {
       const { agents } = await orca.host.call('agents.list', { workspaceId: workspace.id })
       for (const agent of agents) {

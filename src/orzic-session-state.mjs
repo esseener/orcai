@@ -17,9 +17,9 @@ export function hostActive(state) {
   return state === 'working'
 }
 
-/** Keep recent records, plus any session Orca still runs (even past the window). */
+/** Keep recent records, plus a session Orca is still working (even past the window). */
 export function sessionVisible(row) {
-  return row.recent === true || (row.hostState != null && row.hostState !== 'done')
+  return row.recent === true || row.hostState === 'working'
 }
 
 /** Active sessions first; each group newest first, with a stable file tie-break. */
@@ -36,4 +36,21 @@ export function sortSessions(rows) {
 export function applyHostState(row, sessionId, state) {
   if (!sessionId || row.sessionId !== sessionId) return row
   return { ...row, hostState: state, active: hostActive(state) }
+}
+
+/**
+ * A snapshot requested before an event must not undo it. Keep the event state
+ * until a snapshot actually reflects it; then drop the override.
+ */
+export function mergeHostOverrides(rows, overrides) {
+  return rows.map((row) => {
+    if (!row.sessionId) return row
+    const state = overrides.get(row.sessionId)
+    if (!state) return row
+    if (row.hostState === state) {
+      overrides.delete(row.sessionId)
+      return row
+    }
+    return applyHostState(row, row.sessionId, state)
+  })
 }

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  RECENT_WINDOW_MS, applyHostState, hostActive, isRecent, sessionIdFromFile, sessionVisible, sortSessions,
+  RECENT_WINDOW_MS, applyHostState, hostActive, isRecent, mergeHostOverrides, sessionIdFromFile, sessionVisible, sortSessions,
 } from './orzic-session-state.mjs'
 
 test('session ids come from the JSONL suffix, not titles or cwd', () => {
@@ -23,12 +23,14 @@ test('the recent window is exactly twenty minutes', () => {
   assert.equal(isRecent(now - RECENT_WINDOW_MS - 1, now), false)
 })
 
-test('a working session stays visible past the window, a done one does not', () => {
+test('a working session stays visible past the window, other states do not', () => {
   assert.equal(sessionVisible({ recent: false, hostState: 'working' }), true)
-  assert.equal(sessionVisible({ recent: false, hostState: 'blocked' }), true)
+  assert.equal(sessionVisible({ recent: false, hostState: 'blocked' }), false)
+  assert.equal(sessionVisible({ recent: false, hostState: 'waiting' }), false)
   assert.equal(sessionVisible({ recent: false, hostState: 'done' }), false)
   assert.equal(sessionVisible({ recent: false, hostState: null }), false)
   assert.equal(sessionVisible({ recent: true, hostState: null }), true)
+  assert.equal(sessionVisible({ recent: true, hostState: 'blocked' }), true)
 })
 
 test('active sessions sort first, then each group by newest activity', () => {
@@ -44,6 +46,19 @@ test('active sessions sort first, then each group by newest activity', () => {
     sortSessions([{ file: 'b', active: true, ageMs: 1 }, { file: 'a', active: true, ageMs: 1 }]).map((row) => row.file),
     ['a', 'b'],
   )
+})
+
+test('an event state survives a snapshot requested before it', () => {
+  const alpha = { sessionId: 'alpha', hostState: 'working', active: true, file: 'alpha' }
+  const beta = { sessionId: 'beta', hostState: 'working', active: true, file: 'beta' }
+  const overrides = new Map([['alpha', 'done']])
+  const merged = mergeHostOverrides([alpha, beta], overrides)
+  assert.deepEqual(merged[0], { ...alpha, hostState: 'done', active: false })
+  assert.equal(merged[1], beta)
+  // The override is released only after the host snapshot catches up.
+  assert.equal(overrides.has('alpha'), true)
+  mergeHostOverrides([{ ...alpha, hostState: 'done', active: false }], overrides)
+  assert.equal(overrides.has('alpha'), false)
 })
 
 test('a status event only changes the matching session id', () => {

@@ -168,7 +168,7 @@ test('an agent status event updates the matching session immediately', async () 
     hostState: 'working' | 'done'; title: string; cwd: string; model: string; thinking: string | null;
     stage: 'executing'; lastTool: string | null; lastToolAt: string | null;
   }
-  let rows: EventRow[] = [
+  const rows: EventRow[] = [
     {
       file: 'C:\\sessions\\alpha.jsonl', dir: 'sessions', ageMs: 1_000, active: true, recent: true, sessionId: 'alpha', hostState: 'working', title: 'Alpha', cwd: 'C:\\work\\alpha',
       model: 'model-alpha', thinking: null, stage: 'executing' as const, lastTool: null, lastToolAt: null,
@@ -186,7 +186,8 @@ test('an agent status event updates the matching session immediately', async () 
   assert.equal(mounted.findAll({ type: 'Badge', text: '执行' }).length, 2)
   assert.match(mounted.find({ text: /2 个活跃/ })?.text ?? '', /2 个活跃/)
 
-  rows = rows.map((row) => row.sessionId === 'alpha' ? { ...row, hostState: 'done' as const, active: false } : row)
+  // The mock snapshot stays `working` on purpose: the event's local update
+  // must survive the refresh it triggers.
   await mounted.emit('agent.status.changed', {
     workspaceId: null, paneKey: 'pane', state: 'done', receivedAt: Date.now(), sessionId: 'alpha',
   })
