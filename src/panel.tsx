@@ -235,7 +235,7 @@ function modelPicker(fid: Fid, title: string, caption: string, currentModel: str
   const d = read(draft)[fid] ?? {}
   const isEditing = read(editing) === fid
   const query = (d.search ?? '').trim().toLowerCase()
-  const filtered = models.filter((m) => !query || m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query)).slice(0, 20)
+  const filtered = models.filter((m) => !query || m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query)).slice(0, 200)
   const selected = d.model ?? currentModel
   const selectedModel = models.find((m) => m.id === selected)
   const efforts = selectedModel?.thinking ?? []
