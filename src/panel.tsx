@@ -1,7 +1,7 @@
 import { atom, Badge, Box, Button, Card, Checkbox, EmptyState, IconButton, Image, Input, KeyValue, on, plugin, read, Row, Separator, set, Stack, Tab, Tabs, Text, Textarea, type PanelContext } from 'orca'
 import type { FusionState, OmpModel, RoutingRules, SessionStage, SessionStatus } from './protocol'
 import { filterModelChoices, isFusionModel } from './orzic-models.mjs'
-import { normalizeRoutingRules } from './orzic-routing.mjs'
+import { DEFAULT_ROUTING, normalizeRoutingRules } from './orzic-routing.mjs'
 import { RECENT_WINDOW_MINUTES, applyHostState, mergeHostOverrides, sessionVisible, sortSessions } from './orzic-session-state.mjs'
 
 const status = atom<{ data?: { models?: OmpModel[]; fusion: FusionState }; error?: string } | null>(null)
@@ -125,7 +125,7 @@ const editing = atom<string | null>(null)
 const draft = atom<Record<string, { model?: string; effort?: string | null; search?: string }>>({})
 const rulesOpen = atom(false)
 const rulesDraft = atom<RoutingRules | null>(null)
-const PLUGIN_VERSION = '0.2.3'
+const PLUGIN_VERSION = '0.2.4'
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function stageLabel(stage: SessionStage): string {
@@ -250,9 +250,10 @@ function rulesEditor(f: FusionState) {
           onChange={(value) => update({ planRequired: lines(value) })}
         />
         <Text size="xs" muted>纯文本、包含即匹配，不区分大小写；规划短语优先。保存后下一轮生效。</Text>
-        <Row justify="between" align="center" gap="sm">
-          <Text size="xs" muted>{rules.replanPhrases.length + rules.executePhrases.length + rules.planRequired.length} 条自定义规则</Text>
+        <Row justify="between" align="center" gap="sm" wrap>
+          <Text size="xs" muted>{rules.replanPhrases.length + rules.executePhrases.length + rules.planRequired.length} 条规则</Text>
           <Row gap="xs" align="center">
+            <Button size="sm" variant="ghost" onPress={() => set(rulesDraft, normalizeRoutingRules(DEFAULT_ROUTING))}>填入常用规则</Button>
             <Button size="sm" disabled={read(busy)} onPress={saveRules}>保存规则</Button>
             <Button size="sm" variant="ghost" onPress={closeRules}>取消</Button>
           </Row>

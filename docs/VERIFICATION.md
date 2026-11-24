@@ -21,7 +21,7 @@ Related regression coverage:
 - `npm test` → 139 tests, 138 passed, 1 skipped.
 - `npm run typecheck` → passed.
 - `orca plugin check .` → panel rendered with no issues or warnings.
-- `orca plugin validate .` → `esseener.orcai` 0.2.3 valid, no errors.
+- `orca plugin validate .` → `esseener.orcai` 0.2.4 valid, no errors.
 
 ## Routing rules
 
@@ -55,11 +55,12 @@ The active-first ordering is intentional. The earlier prototype kept every row i
 - Minimum Orca is `>=1.4.268`: the `agents.list` `workspaceId` parameter belongs to host API 1.10 (Orca 1.4.260), so 1.4.268 includes it.
 - Upgrade path: unload the old development key `local.orzic`, load the new `esseener.orcai`, and copy any notes first because plugin storage is not migrated across identities.
 
-## Editable routing (0.2.3)
+## Editable routing (0.2.3+)
 
-- `orzic-routing.test.mjs` covers literal phrase normalization/deduplication, custom execution and re-plan phrases, re-plan precedence, and case-insensitive `PLAN.md` requirements.
+- Starter presets cover re-planning, execution continuations, and negative phrases; an old empty rule set migrates to the presets while an explicit empty save stays empty.
+- `orzic-routing.test.mjs` covers literal phrase normalization/deduplication, custom execution and re-plan phrases, re-plan precedence, case-insensitive `PLAN.md` requirements, and preset migration.
 - `orzic-loop.test.mjs` covers a custom execution phrase, custom re-plan precedence, a rejected plan missing required content, and changing the rule file before the next prompt without reloading.
-- `panel.test.tsx` covers opening the editor, saving phrases through `fusion.set`, cancelling without writing, and showing a failed save; 139 tests, 138 passed, 1 skipped.
+- `panel.test.tsx` covers opening the editor, saving phrases through `fusion.set`, cancelling without writing, and showing a failed save; 140 tests, 139 passed, 1 skipped.
 - Active-first ordering is a later product request and intentionally moves rows when host state or recency changes; the README documents this behavior.
 
 ## Published artifact

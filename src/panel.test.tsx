@@ -117,9 +117,9 @@ test('routing rules can be edited and saved from the panel', async () => {
   mounted = await mount(panel, { host: mockHost({ requests }) })
   assert.deepEqual(mounted.errors, [])
   await mounted.press({ text: '编辑规则' })
-  await mounted.type({ label: '回到规划的短语' }, '换个方案\n先评估')
-  await mounted.type({ label: '继续执行的短语' }, '开始实现')
-  await mounted.type({ label: 'PLAN.md 必含内容' }, '## 步骤')
+  await mounted.type({ label: '回到规划的短语' }, '换个方案\n先评估', { replace: true })
+  await mounted.type({ label: '继续执行的短语' }, '开始实现', { replace: true })
+  await mounted.type({ label: 'PLAN.md 必含内容' }, '## 步骤', { replace: true })
   await mounted.press({ text: '保存规则' })
   const writes = (mounted.host.callsOf('plugin.request') as { name: string; input: unknown }[])
     .filter((call) => call.name === 'fusion.set')
@@ -127,6 +127,7 @@ test('routing rules can be edited and saved from the panel', async () => {
   assert.deepEqual(writes, [{
     routing: {
       useBuiltin: true,
+      presetVersion: 1,
       replanPhrases: ['换个方案', '先评估'],
       executePhrases: ['开始实现'],
       planRequired: ['## 步骤'],
@@ -268,7 +269,7 @@ test('a failed routing save is shown instead of silently dropping the rules', as
   })
   assert.deepEqual(mounted.errors, [])
   await mounted.press({ text: '编辑规则' })
-  await mounted.type({ label: '继续执行的短语' }, '开始实现')
+  await mounted.type({ label: '继续执行的短语' }, '开始实现', { replace: true })
   await mounted.press({ text: '保存规则' })
   await mounted.settled()
   assert.ok(mounted.find({ text: /rule save failed/ }))

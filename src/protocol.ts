@@ -1,5 +1,6 @@
 export type RoutingRules = {
   useBuiltin: boolean
+  presetVersion?: number
   replanPhrases: string[]
   executePhrases: string[]
   planRequired: string[]

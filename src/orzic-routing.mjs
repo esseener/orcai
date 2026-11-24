@@ -1,10 +1,24 @@
 export const ROUTING_LIMITS = { phrases: 20, planRequired: 10, phraseLength: 80 }
 
+// Visible starter rules. They are ordinary editable phrases; nothing hidden.
+// Re-plan phrases are checked first, so a negative phrase such as
+// "不要直接执行" pulls a session back instead of matching "直接执行".
 export const DEFAULT_ROUTING = Object.freeze({
   useBuiltin: true,
-  replanPhrases: [],
-  executePhrases: [],
-  planRequired: [],
+  presetVersion: 1,
+  replanPhrases: Object.freeze([
+    '重新规划', '重新计划', '重新评估',
+    '审查一下', '评估一下', '分析一下', '复盘一下', '拆解一下',
+    '先做计划', '先写计划', '先给方案', '换个方案', '换一个方案', '换个思路',
+    '不要直接执行', '不要开始执行', '不要开始实现', '不要继续执行', '不要执行', '先别执行',
+  ]),
+  executePhrases: Object.freeze([
+    '开始实现', '开始执行', '继续实现', '继续执行',
+    '按计划执行', '按计划实现', '执行计划', '接着做', '动手吧', '开干', '开工',
+    '开始做', '继续推进', '直接实现', '直接执行',
+    'start implementing', 'implement it', 'go ahead', 'proceed', 'continue',
+  ]),
+  planRequired: Object.freeze([]),
 })
 
 const cleanPhrases = (value, limit) => {
@@ -22,10 +36,29 @@ const cleanPhrases = (value, limit) => {
   return out
 }
 
+const cloneDefault = () => ({
+  useBuiltin: DEFAULT_ROUTING.useBuiltin,
+  presetVersion: DEFAULT_ROUTING.presetVersion,
+  replanPhrases: [...DEFAULT_ROUTING.replanPhrases],
+  executePhrases: [...DEFAULT_ROUTING.executePhrases],
+  planRequired: [...DEFAULT_ROUTING.planRequired],
+})
+
 export function normalizeRoutingRules(value) {
-  const row = value && typeof value === 'object' ? value : {}
+  const row = value && typeof value === 'object' ? value : null
+  const hasSavedMarker = typeof row?.presetVersion === 'number' && row.presetVersion >= 1
+  const hasCustomLists = Boolean(row && (
+    (Array.isArray(row.replanPhrases) && row.replanPhrases.length) ||
+    (Array.isArray(row.executePhrases) && row.executePhrases.length) ||
+    (Array.isArray(row.planRequired) && row.planRequired.length)
+  ))
+  // A pre-preset config with the built-in matcher on and no custom lists is
+  // the old empty default: show the starter rules. An explicit empty save has
+  // presetVersion and stays empty.
+  if (!row || (!hasSavedMarker && !hasCustomLists && row.useBuiltin !== false)) return cloneDefault()
   return {
     useBuiltin: row.useBuiltin !== false,
+    presetVersion: 1,
     replanPhrases: cleanPhrases(row.replanPhrases, ROUTING_LIMITS.phrases),
     executePhrases: cleanPhrases(row.executePhrases, ROUTING_LIMITS.phrases),
     planRequired: cleanPhrases(row.planRequired, ROUTING_LIMITS.planRequired),

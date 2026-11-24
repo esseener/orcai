@@ -38,3 +38,12 @@ test('plan requirements are literal and case-insensitive', () => {
   assert.deepEqual(missingPlanRequirements('# PLAN\n## steps', rules), ['## Verify'])
   assert.deepEqual(missingPlanRequirements('', rules), ['## Steps', '## Verify'])
 })
+
+test('old empty rules receive presets; an explicit empty save stays empty', () => {
+  const legacy = normalizeRoutingRules({ useBuiltin: true, replanPhrases: [], executePhrases: [], planRequired: [] })
+  assert.deepEqual(legacy.replanPhrases, [...DEFAULT_ROUTING.replanPhrases])
+  assert.deepEqual(legacy.executePhrases, [...DEFAULT_ROUTING.executePhrases])
+  const explicit = normalizeRoutingRules({ useBuiltin: true, presetVersion: 1, replanPhrases: [], executePhrases: [], planRequired: [] })
+  assert.deepEqual(explicit.replanPhrases, [])
+  assert.deepEqual(explicit.executePhrases, [])
+})

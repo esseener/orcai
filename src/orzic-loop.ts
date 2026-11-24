@@ -32,6 +32,7 @@ type Pi = {
 }
 type RoutingRules = {
   useBuiltin: boolean
+  presetVersion?: number
   replanPhrases: string[]
   executePhrases: string[]
   planRequired: string[]
@@ -41,7 +42,19 @@ type AcceptanceCfg = {
   autoReview: boolean; autoRework: boolean; maxRework: number; autoRoute: boolean
   planner: string | null; executor: string | null; routing: RoutingRules
 }
-const DEFAULT_ROUTING: RoutingRules = { useBuiltin: true, replanPhrases: [], executePhrases: [], planRequired: [] }
+const PRESET_REPLAN = [
+  '重新规划', '重新计划', '重新评估',
+  '审查一下', '评估一下', '分析一下', '复盘一下', '拆解一下',
+  '先做计划', '先写计划', '先给方案', '换个方案', '换一个方案', '换个思路',
+  '不要直接执行', '不要开始执行', '不要开始实现', '不要继续执行', '不要执行', '先别执行',
+]
+const PRESET_EXECUTE = [
+  '开始实现', '开始执行', '继续实现', '继续执行',
+  '按计划执行', '按计划实现', '执行计划', '接着做', '动手吧', '开干', '开工',
+  '开始做', '继续推进', '直接实现', '直接执行',
+  'start implementing', 'implement it', 'go ahead', 'proceed', 'continue',
+]
+const DEFAULT_ROUTING: RoutingRules = { useBuiltin: true, presetVersion: 1, replanPhrases: PRESET_REPLAN, executePhrases: PRESET_EXECUTE, planRequired: [] }
 const cleanRules = (value: unknown, limit: number): string[] => {
   if (!Array.isArray(value)) return []
   const seen = new Set<string>()
@@ -57,9 +70,19 @@ const cleanRules = (value: unknown, limit: number): string[] => {
   return out
 }
 const normalizeRouting = (value: unknown): RoutingRules => {
-  const row = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  const row = value && typeof value === 'object' ? value as Record<string, unknown> : null
+  const hasMarker = typeof row?.presetVersion === 'number' && row.presetVersion >= 1
+  const hasCustom = Boolean(row && (
+    (Array.isArray(row.replanPhrases) && row.replanPhrases.length) ||
+    (Array.isArray(row.executePhrases) && row.executePhrases.length) ||
+    (Array.isArray(row.planRequired) && row.planRequired.length)
+  ))
+  if (!row || (!hasMarker && !hasCustom && row.useBuiltin !== false)) {
+    return { useBuiltin: true, presetVersion: 1, replanPhrases: [...PRESET_REPLAN], executePhrases: [...PRESET_EXECUTE], planRequired: [] }
+  }
   return {
     useBuiltin: row.useBuiltin !== false,
+    presetVersion: 1,
     replanPhrases: cleanRules(row.replanPhrases, 20),
     executePhrases: cleanRules(row.executePhrases, 20),
     planRequired: cleanRules(row.planRequired, 10),
