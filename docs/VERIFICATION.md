@@ -21,7 +21,7 @@ Related regression coverage:
 - `npm test` → 126 tests, 125 passed, 1 skipped.
 - `npm run typecheck` → passed.
 - `orca plugin check .` → panel rendered with no issues or warnings.
-- `orca plugin validate .` → `esseener.orcai` 0.2.1 valid, no errors.
+- `orca plugin validate .` → `esseener.orcai` 0.2.2 valid, no errors.
 
 ## Ordering decision
 
@@ -31,11 +31,11 @@ The active-first ordering is intentional. The earlier prototype kept every row i
 
 - Plugin id is `orcai`; the existing `esseener/orzic` repository is a different Team Flow plugin and already owns the `orzic` id.
 - Panel id remains `orzic`, so `--panel orzic` keeps working for existing scripts.
-- Minimum Orca remains `>=1.4.268`. The host API 1.10 `workspaceId` parameter used by `agents.list` shipped in Orca 1.4.260, so 1.4.268 includes it.
-- Upgrade path: unload the old development key `local.orzic`, load the new `local.orcai`, and copy any notes first because plugin storage is not migrated across identities.
+- Minimum Orca is `>=1.4.271`, the version used to load the panel and receive `agent.status.changed` during this release check. Lower versions were not verified for this release.
+- Upgrade path: unload the old development key `local.orzic`, load the new `esseener.orcai`, and copy any notes first because plugin storage is not migrated across identities.
 
 ## Published artifact
 
 - Repository: `https://github.com/esseener/orcai`
-- Release: `v0.2.0` (first public package); `v0.2.1` restores the panel id and minimum-version compatibility.
+- Release: `v0.2.0` (first public package); `v0.2.1` restores the panel id; `v0.2.2` corrects the development key, upgrade notes, and verified minimum Orca version.
 - `orca plugin release-entry .` on the tagged commit reports plugin key `esseener.orcai`, execution `trusted-worker`, and the expected capabilities/contributions.

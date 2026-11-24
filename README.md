@@ -23,7 +23,7 @@ An Orca sidebar workbench for OMP: plan/execute model routing, live agent sessio
 
 - 通过 Orca 的 agent 状态读取真实 `working` / `blocked` / `waiting` / `done`，按 session id 对应本地 JSONL；订阅 `agent.status.changed` 即时更新。
 - 活跃会话置顶，同组按最近活动时间排序。
-- 排序是活跃优先的实时排序：宿主状态或最近活动时间变化时，行会移动到新位置。
+- 排序是活跃优先的实时排序：宿主状态或最近活动时间变化时，行会移动到新位置。该排序是后续用户明确要求，覆盖早期“固定位置”原型，不是回归。
 - 显示最近 20 分钟有活动的会话；仍在 `working` 的会话即使超过 20 分钟也继续显示。
 - 每条只显示名称、当前模型、阶段、最近工具和项目，用分隔线隔开。
 
@@ -40,7 +40,7 @@ An Orca sidebar workbench for OMP: plan/execute model routing, live agent sessio
 
 ## 安装
 
-要求 **Orca >= 1.4.268** 和可用的 OMP CLI。
+要求 **Orca >= 1.4.271** 和可用的 OMP CLI。
 
 ### Orca 插件目录
 
@@ -72,13 +72,13 @@ https://github.com/esseener/orcai.git
 npm ci
 orca plugin dev load . --json
 orca plugin dev reload . --json
-orca plugin open local.orcai --panel orzic --json
+orca plugin open esseener.orcai --panel orzic --json
 ```
 
 ### 从旧开发版升级
 
 - 公开插件身份是 `esseener.orcai`；旧的本地开发条目 `local.orzic` 需要 `orca plugin dev unload` 后重新加载，不会自动迁移。
-- 面板 id 保持 `orzic`，所以 `--panel orzic` 的脚本无需修改；只有插件 key 从 `local.orzic` 变为 `local.orcai`。
+- 面板 id 保持 `orzic`，所以 `--panel orzic` 的脚本无需修改；插件 key 从 `local.orzic` 变为 `esseener.orcai`（开发目录和 Git 安装同 key）。
 - 设置和便签属于插件存储，不跨身份迁移；升级前请先复制需要的便签。
 
 ## 开发
@@ -110,7 +110,7 @@ npm run check:version
 
 ## 版本
 
-当前版本 **0.2.1**。变更见 [CHANGELOG.md](CHANGELOG.md)；实现与验证记录见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
+当前版本 **0.2.2**。变更见 [CHANGELOG.md](CHANGELOG.md)；实现与验证记录见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
 
 ## 许可
 
