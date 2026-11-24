@@ -17,7 +17,7 @@ const fusionRow = (i: number): OmpModel => ({
 
 const current = 'a6api · GPT-6.2 Astra'
 const models: OmpModel[] = [
-  { id: 'a6api/gpt-6.2-astra', name: 'GPT-6.2 Astra', provider: 'a6api', thinking: ['high'] },
+  { id: 'a6api/gpt-6.2-astra', name: 'GPT-6.2 Astra', provider: 'a6api', thinking: ['low', 'medium', 'high', 'xhigh', 'max'] },
   ...Array.from({ length: 285 }, (_, i) => fusionRow(i)),
   { id: 'devin/swe-2', name: 'SWE-2', provider: 'devin', thinking: ['high'] },
   { id: 'devin/swe-2-fast', name: 'SWE-2 Fast', provider: 'devin', thinking: [] },
@@ -86,4 +86,22 @@ test('picking a filtered model writes it as the plan model', async () => {
     .filter((call) => call.name === 'fusion.set')
     .map((call) => call.input)
   assert.deepEqual(writes, [{ from: 'devin/swe-2', fromEffort: null }])
+})
+
+test('the selected thinking level is highlighted, not a gray ghost', async () => {
+  mounted = await mount(panel, {
+    host: mockHost({
+      requests: {
+        ...requests,
+        'fusion.status': { models, fusion: { ...fusion, fromEffort: 'xhigh' } },
+      },
+    }),
+  })
+  assert.deepEqual(mounted.errors, [])
+  const active = mounted.find({ type: 'Button', text: 'xhigh' })
+  assert.equal(active?.props.variant, 'solid')
+  assert.equal(active?.props.tone, 'accent')
+  const idle = mounted.find({ type: 'Button', text: 'low' })
+  assert.equal(idle?.props.variant, 'ghost')
+  assert.equal(idle?.props.tone, 'neutral')
 })

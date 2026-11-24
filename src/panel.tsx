@@ -89,7 +89,7 @@ async function runReview() {
 const busy = atom(false)
 const editing = atom<string | null>(null)
 const draft = atom<Record<string, { model?: string; effort?: string | null; search?: string }>>({})
-const PLUGIN_VERSION = '0.1.14'
+const PLUGIN_VERSION = '0.1.15'
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function stageLabel(stage: SessionStage): string {
@@ -281,7 +281,7 @@ function modelPicker(fid: Fid, title: string, caption: string, currentModel: str
           {['', ...efforts].map((l) => {
             const active = (effort ?? '') === l
             return (
-              <Button key={l || 'default'} size="xs" variant={active ? 'solid' : 'ghost'} disabled={read(busy)} onPress={() => {
+              <Button key={l || 'default'} size="xs" variant={active ? 'solid' : 'ghost'} tone={active ? 'accent' : 'neutral'} disabled={read(busy)} onPress={() => {
                 const d2 = read(draft)[fid] ?? {}
                 set(draft, { ...read(draft), [fid]: { ...d2, effort: l || null } })
                 patch({ [fidKeys[fid][1]]: l || null })
