@@ -1,11 +1,19 @@
 {
   "manifestVersion": 2,
-  "id": "orzic",
+  "id": "orcai",
+  "publisher": "esseener",
   "name": "Orcai",
-  "version": "0.1.27",
-  "description": "Orcai - plugin host for multiple modules. Orzic (Fusion) routes plan/execute models and runs acceptance out of session.",
+  "version": "0.2.0",
+  "description": "Orca sidebar for OMP: plan/execute model routing, live agent sessions, and out-of-session acceptance review.",
+  "author": {
+    "name": "esseener",
+    "url": "https://github.com/esseener"
+  },
+  "repository": "https://github.com/esseener/orcai",
+  "homepage": "https://github.com/esseener/orcai",
+  "license": "MIT",
   "engines": {
-    "orca": ">=1.4.268"
+    "orca": ">=1.4.271"
   },
   "execution": "trusted-worker",
   "pluginApi": 1,
@@ -13,7 +21,7 @@
   "contributes": {
     "panels": [
       {
-        "id": "orzic",
+        "id": "orcai",
         "title": "Orcai",
         "icon": "blocks",
         "entry": "src/panel.tsx",

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0 — 2026-11-24
+
+- 公开发布：插件身份为 `esseener.orcai`，仓库 `https://github.com/esseener/orcai`，与已有的 `esseener/orzic`（Team Flow）分开。
+- 重写 README、manifest、package 元数据和安装/权限说明；新增 MIT LICENSE。
+- 功能收口：规划/执行路由、Orca agent 实时状态、活跃优先的 20 分钟会话视图、会话外验收和便签。
+- manifest 面板 id 改为 `orcai`；内部状态文件与既有 Orzic 模块名保留。版本 0.2.0。
+
 ## 0.1.27 — 2026-11-24
 
 - 修复在途 `session.list` 覆盖状态事件：事件状态保留到宿主快照真正追上后才释放；事件触发的刷新若遇到在途请求会排队执行。
