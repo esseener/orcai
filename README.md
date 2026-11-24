@@ -1,12 +1,34 @@
-<img src="assets/logo5.png" alt="Orzic" height="48">
+<img src="assets/logo5.png" alt="Orcai" height="48">
 
-# Orzic
+# Orcai
 
 OMP 的规划/执行侧栏调度器 + 自动验收循环。新请求先交给规划模型只读规划；`PLAN.md` 写入工具成功返回且计划非空后，同一会话切执行模型，之后只有明确继续才留在执行阶段。验收在会话外由独立 judge 对着 diff 和**本会话**已批准的计划判定。
 
+## 版本与发布
+
+当前版本 **0.1.11**，见 [CHANGELOG.md](CHANGELOG.md)。插件显示名为 **Orcai**；插件 id、面板 id 和状态文件仍保留 `orzic` 前缀，避免既有安装与审批失效。
+
+版本号同时维护在三处：
+
+- `orca-plugin.json` 的 `version`
+- `package.json` 的 `version`
+- `src/panel.tsx` 的 `PLUGIN_VERSION`
+
+每次发布：
+
+```powershell
+# 1. 更新上面三处版本号，并把 CHANGELOG 的 Unreleased 移到对应版本
+npm run check:version
+npm run typecheck
+node --test src/*.test.mjs
+npm run smoke:omp
+# 2. 提交后打标签
+git tag -a v0.1.11 -m "v0.1.11"
+```
+
 ## 面板标签
 
-- **Orzic**：开始任务、规划/执行模型、验收设置和 OMP 会话状态。
+- **Orcai**：开始任务、规划/执行模型、验收设置和 OMP 会话状态。
 - **便签**：记录运行中的临时想法，支持新建、编辑、删除和持久保存。点击「复制」后手动粘贴到 OMP 输入框并自行提交；便签不会自动注入或发送。
 
 ## 规划/执行路由
@@ -19,9 +41,9 @@ OMP 的规划/执行侧栏调度器 + 自动验收循环。新请求先交给规
 - **规划指令注入**：规划轮会注入一条隐藏说明，明确只读边界和 `PLAN.md` 交接出口；不再只靠被拦截后的报错让模型猜
 - **阶段落盘**：规划阶段写入 `~/.omp/agent/orzic-phases/<session-hash>.json`（12 小时内有效），进程恢复后首个工具调用也会重新判定；交接成功后删除标记
 - **模型不可用**：本轮中止并提示，绝不静默降级到另一个模型
-- **子代理不参与路由**：Orzic 只调度主会话；`task` 子代理的模型由 OMP 自己决定，不会重走规划、不会阻塞写入，也不会覆盖主会话的 `orzic-plan-<repoKey>.json` 计划快照
-- **子代理同规则** = 面板开关把内置 `task` 子代理交给 OMP 的 `task.prewalk`，与上面这条 Orzic 路由边界是两件事
-- **与 OMP 原生 plan mode 的边界**：Orzic 维护自己的规划阶段，以 `PLAN.md` 写入成功作为交接，不读取也不接管 OMP 原生 plan mode 的审批状态。同一会话请只用一种规划入口；原生 plan mode 的模型与只读由 OMP 自己管理，Orzic 的标记与交接不参与。
+- **子代理不参与路由**：Orcai 只调度主会话；`task` 子代理的模型由 OMP 自己决定，不会重走规划、不会阻塞写入，也不会覆盖主会话的 `orzic-plan-<repoKey>.json` 计划快照
+- **子代理同规则** = 面板开关把内置 `task` 子代理交给 OMP 的 `task.prewalk`，与上面这条 Orcai 路由边界是两件事
+- **与 OMP 原生 plan mode 的边界**：Orcai 维护自己的规划阶段，以 `PLAN.md` 写入成功作为交接，不读取也不接管 OMP 原生 plan mode 的审批状态。同一会话请只用一种规划入口；原生 plan mode 的模型与只读由 OMP 自己管理，Orcai 的标记与交接不参与。
 - **task 委派也纳入验收**：执行阶段完成的 `task` 调用会为父会话记一次待验收；若该轮 `agent_end` 仍在等后台子代理（`awaitingAsyncWork`），验收推迟到子代理结果回来后的收尾，由父会话的 session pin 启动一次 driver。
 - 会话卡实时显示当前模型、最近工具和模型切换时间线；多会话可切换查看
 

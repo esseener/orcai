@@ -57,7 +57,7 @@ for cand in ('C:/Windows/Fonts/Futura Md BT Medium.ttf',
              'C:/Windows/Fonts/segoeuib.ttf'):
     if os.path.exists(cand):
         font = ImageFont.truetype(cand, int(SIZE * S * 0.58)); break
-word = 'Orzic'
+word = 'Orcai'
 tmp = Image.new('RGBA', (8, 8)); td = ImageDraw.Draw(tmp)
 bb = td.textbbox((0, 0), word, font=font); tw, th = bb[2]-bb[0], bb[3]-bb[1]
 GAP = int(SIZE * S * 0.10)

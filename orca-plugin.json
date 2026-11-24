@@ -1,9 +1,9 @@
 {
   "manifestVersion": 2,
   "id": "orzic",
-  "name": "Orzic",
-  "version": "0.1.2",
-  "description": "Orzic - OMP plan-mode routing: plan with one model, approve, then execute with another in the same session.",
+  "name": "Orcai",
+  "version": "0.1.11",
+  "description": "Orcai - OMP plan-mode routing: plan with one model, approve, then execute with another in the same session.",
   "engines": {
     "orca": ">=1.4.268"
   },
@@ -14,7 +14,7 @@
     "panels": [
       {
         "id": "orzic",
-        "title": "Orzic",
+        "title": "Orcai",
         "icon": "blocks",
         "entry": "src/panel.tsx",
         "ui": "components"

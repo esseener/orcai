@@ -1,7 +1,14 @@
 {
-  "name": "orzic",
-  "version": "0.1.2",
+  "name": "orcai",
+  "version": "0.1.11",
   "private": true,
-  "scripts": { "typecheck": "tsc -p .", "smoke:omp": "node tools/smoke-omp.mjs" },
-  "devDependencies": { "@types/node": "24.13.6", "typescript": "5.9.3" }
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "smoke:omp": "node tools/smoke-omp.mjs",
+    "check:version": "node tools/check-version.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.6",
+    "typescript": "5.9.3"
+  }
 }

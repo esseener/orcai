@@ -88,7 +88,7 @@ async function runReview() {
 const busy = atom(false)
 const editing = atom<string | null>(null)
 const draft = atom<Record<string, { model?: string; effort?: string | null; search?: string }>>({})
-const PLUGIN_VERSION = '0.1.2'
+const PLUGIN_VERSION = '0.1.11'
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function stageLabel(stage: SessionStage): string {
@@ -361,13 +361,13 @@ function sessionCard(f?: FusionState, driver: DriverState | null = null) {
 			<Stack gap="md">
 				<Row justify="between" align="center" gap="sm">
 					<Row align="center" gap="none">
-						<Box width={64} shrink={false}><Image src="assets/logo5.png" alt="Orzic" size="full" fit="contain" /></Box>
+						<Box width={64} shrink={false}><Image src="assets/logo5.png" alt="Orcai" size="full" fit="contain" /></Box>
 						<Box width={100} shrink={false} margin="none"><Image src="assets/word.png" alt="" size="xs" fit="contain" /></Box>
 					</Row>
 					{f && read(activeTab) === 'orzic' && <Badge tone={f.enabled ? 'accent' : 'neutral'}>{f.enabled ? '规划路由开' : '规划路由关'}</Badge>}
 				</Row>
-				<Tabs label="Orzic 工具" value={read(activeTab)} onChange={(value) => set(activeTab, value)}>
-					<Tab value="orzic" label="Orzic">
+				<Tabs label="Orcai 工具" value={read(activeTab)} onChange={(value) => set(activeTab, value)}>
+					<Tab value="orzic" label="Orcai">
 						<Stack gap="md">
 							<Text size="xs" muted>开始任务后由规划模型只读规划；批准计划后恢复执行模型，验收仍在会话外。</Text>
 							{entry?.error && <Text size="sm" tone="warning">{entry.error}</Text>}
@@ -479,7 +479,7 @@ function sessionCard(f?: FusionState, driver: DriverState | null = null) {
 						</Stack>
 					</Tab>
 				</Tabs>
-				<Text size="xs" muted>Orzic v{PLUGIN_VERSION}</Text>
+				<Text size="xs" muted>Orcai v{PLUGIN_VERSION}</Text>
 			</Stack>
 		</Box>
 	)
