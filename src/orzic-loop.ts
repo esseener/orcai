@@ -198,10 +198,16 @@ export default function (pi: Pi): void {
     return next
   }
 
-  // A new task always starts with the planner. Only an explicit continuation
-  // after a PLAN.md handoff inherits the execution phase; this keeps review and
-  // planning requests on the planner instead of guessing from keywords/length.
-  const continuation = /^(?:继续(?:执行|实现)?|按计划(?:执行|实现)?|开始(?:执行|实现)?|执行计划|好(?:的)?|可以|行|ok|continue|proceed)[。！!.\s]*$/i
+  // A new task always starts with the planner. Once a PLAN.md handoff landed,
+  // the execution phase continues when the message means "go ahead" — exact
+  // acks, or an execution verb without an explicit re-plan request. The old
+  // whole-sentence regex sent "开始执行吧。" and "直接执行 我授权了" back to the
+  // planner, which then could not touch code and looked like a permission bug.
+  const ackOnly = /^(?:继续(?:执行|实现)?|按计划(?:执行|实现)?|开始(?:执行|实现)?|执行计划|好(?:的)?|可以|行|ok|continue|proceed)[。！!.\s]*$/i
+  const executionIntent = /(继续(?:执行|实现|做|干|推进)?|开始(?:执行|实现|实施|做|干)?|执行(?:下去|计划|吧|起来)?|按计划|动手|开干|开工|实施|落地|授权|直接做|直接执行|go\s*ahead|proceed|continue|do\s*it)/i
+  const replanIntent = /(重新(?:规划|计划|审查|评估|分析|设计)|(?:做|写|出|列|改|调整|更新)(?:个|一个|一下)?(?:计划|方案)|规划一下|计划一下|审查|评估|分析|复盘|拆解一下)/i
+  const wantsExecution = (text: string): boolean =>
+    ackOnly.test(text) || (executionIntent.test(text) && !replanIntent.test(text))
   const isPlanTarget = (target: string): boolean => /(?:^|[\\/:])PLAN\.md$/i.test(target)
   const planFilePath = (cwd: string, target: string): string =>
     /^local:\/\//i.test(target) ? target : isAbsolute(target) ? target : join(cwd, target)
@@ -261,7 +267,7 @@ export default function (pi: Pi): void {
     }
     turnBySession.set(f, ++turnSeq)
     hydrate(f)
-    const resume = executing.has(f) && continuation.test(e.prompt.trim())
+    const resume = executing.has(f) && wantsExecution(e.prompt.trim())
     if (resume) {
       const ok = await useModel(ctx, cfg.executor)
       boot(`route session=${f} phase=executing selector=${cfg.executor} ok=${ok}`)

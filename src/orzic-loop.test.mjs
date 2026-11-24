@@ -162,6 +162,16 @@ test('a prefixed continuation is a new request and returns to the planner', asyn
   assert.equal(env.setModels.at(-1), 'planner/plan')
 })
 
+test('natural execution approvals stay on the executor', async () => {
+  for (const prompt of ['开始执行吧。', '直接执行 我授权了', '我要的是md里面的内容执行下去呢。', '按计划执行']) {
+    const env = setup()
+    const ctx = env.ctxFor(join(env.agent, 'sessions', `approve-${prompt.length}.jsonl`))
+    await enterExecution(env, ctx)
+    await env.fire('before_agent_start', { prompt }, ctx)
+    assert.equal(env.setModels.at(-1), 'executor/code', prompt)
+  }
+})
+
 test('a continuation while still planning stays on the planner', async () => {
   const env = setup()
   const ctx = env.ctxFor(join(env.agent, 'sessions', 'a3c.jsonl'))

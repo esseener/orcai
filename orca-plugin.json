@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "orzic",
   "name": "Orcai",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "description": "Orcai - OMP plan-mode routing: plan with one model, approve, then execute with another in the same session.",
   "engines": {
     "orca": ">=1.4.268"
