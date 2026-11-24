@@ -30,6 +30,52 @@ export function parseModelRows(rows) {
   return models
 }
 
+// The devin provider ships ~1000 `fusion-<driver>-<effort>-sidekick-<sidekick>`
+// combos next to ~76 plain models. They are one-off compositions of the same
+// models, swamp every search ("swe2" hits ~285 of them), and push the real
+// entry past the picker's row cap. Hide them unless the user asks for them.
+const FUSION_SEGMENT = /(?:^|[/_.-])fusion(?:[/_.-]|$)/i
+
+export function isFusionModel(model) {
+  const id = typeof model?.id === 'string' ? model.id : ''
+  return FUSION_SEGMENT.test(id)
+}
+
+// "swe2" must find `devin/swe-2`: compare with separators stripped, and rank
+// id hits above name hits so the canonical model is not cut by the row cap.
+const squash = (value) => String(value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '')
+
+function rank(model, query) {
+  if (!query) return 0
+  const id = squash(model.id)
+  const name = squash(model.name)
+  // The selector tail is the model itself (`devin/swe-2`), so it outranks a
+  // provider-wide id or name hit.
+  const tail = squash(String(model.id ?? '').slice(String(model.id ?? '').lastIndexOf('/') + 1))
+  if (id === query || tail === query) return 0
+  if (tail.startsWith(query)) return 1
+  if (name === query) return 2
+  if (name.startsWith(query)) return 3
+  if (id.startsWith(query)) return 4
+  if (id.includes(query)) return 5
+  if (name.includes(query)) return 6
+  return -1
+}
+
+export function filterModelChoices(models, query, { limit = 200 } = {}) {
+  const needle = squash(query)
+  const scored = []
+  for (const model of models) {
+    if (isFusionModel(model)) continue
+    const score = rank(model, needle)
+    if (score < 0) continue
+    scored.push({ model, score })
+  }
+  // Stable: catalog order is the tiebreaker, so equal ranks keep OMP's order.
+  if (needle) scored.sort((a, b) => a.score - b.score)
+  return scored.slice(0, limit).map((entry) => entry.model)
+}
+
 export function createModelCatalog({ run, now = Date.now, ttl = MODEL_CATALOG_TTL_MS } = {}) {
   let cached = null
   let pending = null

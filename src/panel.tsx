@@ -1,5 +1,6 @@
 import { atom, Badge, Box, Button, Card, Checkbox, EmptyState, IconButton, Image, Input, KeyValue, on, plugin, read, Row, Separator, set, Stack, Tab, Tabs, Text, Textarea, type PanelContext } from 'orca'
 import type { FusionState, OmpModel, SessionStage, SessionStatus } from './protocol'
+import { filterModelChoices, isFusionModel } from './orzic-models.mjs'
 
 const status = atom<{ data?: { models?: OmpModel[]; fusion: FusionState }; error?: string } | null>(null)
 const modelList = atom<OmpModel[]>([])
@@ -88,7 +89,7 @@ async function runReview() {
 const busy = atom(false)
 const editing = atom<string | null>(null)
 const draft = atom<Record<string, { model?: string; effort?: string | null; search?: string }>>({})
-const PLUGIN_VERSION = '0.1.11'
+const PLUGIN_VERSION = '0.1.12'
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function stageLabel(stage: SessionStage): string {
@@ -231,11 +232,13 @@ function modelEmptyLabel(): string {
 }
 
 function modelPicker(fid: Fid, title: string, caption: string, currentModel: string | null, currentEffort: string | null, models: OmpModel[]) {
-  const entry = read(status)
   const d = read(draft)[fid] ?? {}
   const isEditing = read(editing) === fid
-  const query = (d.search ?? '').trim().toLowerCase()
-  const filtered = models.filter((m) => !query || m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query)).slice(0, 200)
+  // Devin's ~1000 `fusion-*` combos stay out of the picker: they are one-off
+  // driver/sidekick compositions and they crowd out the plain models a user
+  // actually searches for (e.g. `devin/swe-2`).
+  const filtered = filterModelChoices(models, d.search ?? '')
+  const totalFusion = models.reduce((n, m) => n + (isFusionModel(m) ? 1 : 0), 0)
   const selected = d.model ?? currentModel
   const selectedModel = models.find((m) => m.id === selected)
   const efforts = selectedModel?.thinking ?? []
@@ -256,6 +259,9 @@ function modelPicker(fid: Fid, title: string, caption: string, currentModel: str
         <Box padding="xs" radius="md" background="card" border>
           <Stack gap="xs">
             <Input label="搜索" labelHidden value={d.search ?? ''} placeholder="搜索模型" disabled={read(busy)} onChange={(v) => modelSearch(fid, v)} />
+            {totalFusion > 0 && (
+              <Text size="xs" muted>{`已隐藏 ${totalFusion} 个 Devin fusion 合成模型`}</Text>
+            )}
             <Box maxHeight={180} scroll="y">
               <Stack gap="none" align="stretch">
                 {filtered.map((m) => (

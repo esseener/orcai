@@ -4,7 +4,7 @@
 // concurrent panel retries must share one run.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createModelCatalog, parseModelRows } from './orzic-models.mjs'
+import { createModelCatalog, filterModelChoices, isFusionModel, parseModelRows } from './orzic-models.mjs'
 
 test('concurrent loads share one run and reuse its cache', async () => {
   let calls = 0
@@ -120,4 +120,56 @@ test('blank selector falls back to a non-blank id', () => {
 
 test('whitespace-only identifiers are rejected', () => {
   assert.throws(() => parseModelRows([{ selector: '  ', id: '\t' }]), /没有可用的 selector\/id/)
+})
+
+const fusionModel = (id) => ({ id, name: id.split('/').pop(), thinking: [] })
+
+test('fusion combos are recognised by id segment, not by loose substring', () => {
+  assert.equal(isFusionModel(fusionModel('devin/fusion-claude-opus-5-high-sidekick-swe-2-high')), true)
+  assert.equal(isFusionModel(fusionModel('devin/fusion-alpha')), true)
+  assert.equal(isFusionModel(fusionModel('devin/swe-2')), false)
+  assert.equal(isFusionModel(fusionModel('magpie/fusionless-model')), false)
+  assert.equal(isFusionModel({ id: 'x/infusion' }), false)
+  assert.equal(isFusionModel({}), false)
+})
+
+test('picker hides fusion combos that outnumber and overshadow the real model', () => {
+  // Devin's real catalog: ~285 fusion ids contain `swe-2`, one plain model is
+  // `devin/swe-2`. Before this filter the row cap hid the real entry entirely.
+  const models = [
+    ...Array.from({ length: 285 }, (_, i) => fusionModel(`devin/fusion-claude-fable-5-1-high-sidekick-swe-2-${i}`)),
+    { id: 'devin/swe-2', name: 'SWE-2', thinking: ['high'] },
+    { id: 'devin/swe-2-flash', name: 'SWE-2 Flash', thinking: [] },
+  ]
+  assert.deepEqual(filterModelChoices(models, 'swe2').map((m) => m.id), ['devin/swe-2', 'devin/swe-2-flash'])
+  assert.equal(filterModelChoices(models, 'swe').length, 2)
+  assert.equal(filterModelChoices(models, '').length, 2)
+})
+
+test('search ignores separators so swe2 finds devin/swe-2', () => {
+  const models = [
+    { id: 'devin/swe-1-6', name: 'SWE-1.6', thinking: [] },
+    { id: 'magpie/gpt-5-4', name: 'GPT-5.4', thinking: [] },
+  ]
+  assert.deepEqual(filterModelChoices(models, 'swe2').map((m) => m.id), [])
+  assert.deepEqual(filterModelChoices(models, 'swe16').map((m) => m.id), ['devin/swe-1-6'])
+  assert.deepEqual(filterModelChoices(models, 'gpt54').map((m) => m.id), ['magpie/gpt-5-4'])
+  assert.deepEqual(filterModelChoices(models, '  SWE-1.6  ').map((m) => m.id), ['devin/swe-1-6'])
+})
+
+test('exact and prefix id hits rank above loose name hits', () => {
+  const models = [
+    { id: 'devin/not-sol', name: 'Sol Legacy', thinking: [] },
+    { id: 'devin/sol-fast', name: 'Sol Fast', thinking: [] },
+    { id: 'devin/sol', name: 'Sol', thinking: [] },
+  ]
+  assert.deepEqual(filterModelChoices(models, 'sol').map((m) => m.id), ['devin/sol', 'devin/sol-fast', 'devin/not-sol'])
+})
+
+test('empty query keeps catalog order and the row cap', () => {
+  const models = Array.from({ length: 250 }, (_, i) => ({ id: `p/m${i}`, name: `m${i}`, thinking: [] }))
+  const listed = filterModelChoices(models, '')
+  assert.equal(listed.length, 200)
+  assert.equal(listed[0].id, 'p/m0')
+  assert.equal(filterModelChoices(models, '', { limit: 5 }).length, 5)
 })

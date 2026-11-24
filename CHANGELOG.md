@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.12 — 2026-11-24
+
+- 模型选择器不再列出 Devin 的 `fusion-*` 合成模型(当前目录 1490 个模型里有 995 个)。它们淹没了普通模型:搜 `swe2` 原本命中 285 条 fusion 组合,200 条行数上限把真正的 `devin/swe-2` 挤出去;这些组合仍可用 `omp` CLI 或配置直接指定,面板只是不再展示。
+- 搜索忽略分隔符并给 selector 尾部加权:`swe2` → `devin/swe-2`、`gpt54` → `gpt-5-4`,精确/前缀命中排在模糊命中之前。
+- 新增 `src/panel.test.tsx`(`orca plugin test .`):挂载真实面板,断言 `swe2` 只列出 SWE-2 家族、无 fusion 行,且选中后 `fusion.set` 写入 `devin/swe-2`。
+
 ## 0.1.11 — 2026-11-24
 
 首个按版本号发布的起点。

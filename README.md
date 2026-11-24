@@ -93,6 +93,7 @@ orca plugin open local.orzic --panel orzic --json
 
 ```powershell
 npm run typecheck
+npm run test   # orca plugin test .：node --test + 面板交互（模型选择器等）
 node --test src/orzic-loop.test.mjs src/orzic-driver.test.mjs src/orzic-verdict.test.mjs src/orzic-models.test.mjs
 npm run smoke:omp
 ```
@@ -115,7 +116,7 @@ npm run smoke:omp
 | `src/worker.ts` | `fusion.status`/`fusion.set`/`models.list`/`session.status`/`session.list` + 接线 `acceptance.*` handler;`fusion.status` 用一次 `omp config list` 并立即返回磁盘模型快照,`models.list` 单独刷新目录;`installLoopExtension` 把 loop+driver 同步进 `~/.omp/agent/extensions` |
 | `src/acceptance.ts` | `acceptance.review`(ompJudge/ocrCli 手动判定)+ `acceptance.result`(读 review.json+lock)+ `acceptance.stop`(写带 run-token 的 stop flag,force 附 kill) |
 | `src/cli.ts` | `ompExecutable`(OMP CLI 路径解析)+ `commandError` |
-| `src/panel.tsx` | 侧栏:fusion 配置 / 会话卡 / 验收开关+手动验收 / driver 状态条+停止+强杀;配置与模型目录分两路加载 |
+| `src/panel.tsx` | 侧栏:fusion 配置 / 会话卡 / 验收开关+手动验收 / driver 状态条+停止+强杀;配置与模型目录分两路加载;模型选择器不列 Devin `fusion-*` 合成模型,搜索忽略分隔符(`swe2` → `devin/swe-2`) |
 | `src/protocol.ts` | `PluginRequests` 声明 + `AcceptanceCfg`/`ReviewVerdict`/`Finding`/`ReviewOut`/`FusionState`/`SessionStatus` |
 | `src/orzic-models.mjs` | `omp models ls` 的缓存 + single-flight:并发/重试共享一次 CLI,失败拒绝而不是返回空目录 |
 | `src/orzic-loop.ts` | OMP 扩展:新请求切规划模型、只有明确继续才用执行模型;`tool_call` 阻断规划期 `bash`/`eval` 与 PLAN.md 外写入;`tool_execution_end` 确认写入成功且计划非空后才保存快照并切执行;`agent_end` 只启动会话外验收驱动,不从历史文件补办批准 |

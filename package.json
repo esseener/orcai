@@ -1,8 +1,9 @@
 {
   "name": "orcai",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "private": true,
   "scripts": {
+    "test": "orca plugin test .",
     "typecheck": "tsc -p .",
     "smoke:omp": "node tools/smoke-omp.mjs",
     "check:version": "node tools/check-version.mjs"
