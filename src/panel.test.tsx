@@ -101,7 +101,12 @@ test('the selected thinking level is highlighted, not a gray ghost', async () =>
   const active = mounted.find({ type: 'Button', text: 'xhigh' })
   assert.equal(active?.props.variant, 'solid')
   assert.equal(active?.props.tone, 'accent')
-  const idle = mounted.find({ type: 'Button', text: 'low' })
-  assert.equal(idle?.props.variant, 'ghost')
-  assert.equal(idle?.props.tone, 'neutral')
+  // Every other level must stay visually quiet; checking only one would let a
+  // second highlighted button slip through.
+  for (const label of ['默认', 'low', 'medium', 'high', 'max']) {
+    const idle = mounted.find({ type: 'Button', text: label })
+    assert.ok(idle, `${label} button should be drawn`)
+    assert.equal(idle.props.variant, 'ghost', `${label} must not look selected`)
+    assert.equal(idle.props.tone, 'neutral', `${label} must not carry the accent tone`)
+  }
 })
