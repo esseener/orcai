@@ -132,7 +132,7 @@ npm run check:version
 
 ## 版本
 
-当前版本 **0.2.2**。变更见 [CHANGELOG.md](CHANGELOG.md)；实现与验证记录见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
+当前版本 **0.2.3**。变更见 [CHANGELOG.md](CHANGELOG.md)；实现与验证记录见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
 
 ## 许可
 

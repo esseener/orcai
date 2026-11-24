@@ -125,7 +125,7 @@ const editing = atom<string | null>(null)
 const draft = atom<Record<string, { model?: string; effort?: string | null; search?: string }>>({})
 const rulesOpen = atom(false)
 const rulesDraft = atom<RoutingRules | null>(null)
-const PLUGIN_VERSION = '0.2.2'
+const PLUGIN_VERSION = '0.2.3'
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function stageLabel(stage: SessionStage): string {
