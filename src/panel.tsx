@@ -1,4 +1,4 @@
-import { atom, Badge, Box, Button, Card, Checkbox, EmptyState, IconButton, Image, Input, KeyValue, on, plugin, read, Row, Separator, set, Stack, Tab, Tabs, Text, Textarea, type PanelContext } from 'orca'
+import { atom, Badge, Box, Button, Card, Checkbox, EmptyState, IconButton, Image, Input, KeyValue, on, plugin, read, Row, Select, Separator, set, Stack, Tab, Tabs, Text, Textarea, type PanelContext } from 'orca'
 import type { FusionState, OmpModel, SessionStage, SessionStatus } from './protocol'
 import { filterModelChoices, isFusionModel } from './orzic-models.mjs'
 
@@ -89,7 +89,7 @@ async function runReview() {
 const busy = atom(false)
 const editing = atom<string | null>(null)
 const draft = atom<Record<string, { model?: string; effort?: string | null; search?: string }>>({})
-const PLUGIN_VERSION = '0.1.17'
+const PLUGIN_VERSION = '0.1.18'
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function stageLabel(stage: SessionStage): string {
@@ -231,7 +231,7 @@ function modelEmptyLabel(): string {
   return '模型目录加载中…'
 }
 
-function modelPicker(fid: Fid, title: string, caption: string, currentModel: string | null, currentEffort: string | null, models: OmpModel[]) {
+function modelPicker(fid: Fid, title: string, caption: string, currentModel: string | null, currentEffort: string | null, models: OmpModel[], role?: string) {
   const d = read(draft)[fid] ?? {}
   const isEditing = read(editing) === fid
   // Devin's ~1000 `fusion-*` combos stay out of the picker: they are one-off
@@ -246,12 +246,13 @@ function modelPicker(fid: Fid, title: string, caption: string, currentModel: str
 
   return (
     <Stack gap="xs">
-      <Stack gap="none">
+      <Row align="center" gap="xs">
         <Text size="sm" weight="medium">{title}</Text>
-        <Text size="xs" muted>{caption}</Text>
-      </Stack>
+        {role && <Badge tone="neutral">{role}</Badge>}
+      </Row>
+      <Text size="xs" muted>{caption}</Text>
       <Row justify="start">
-        <Button size="sm" variant="ghost" disabled={read(busy)} onPress={() => set(editing, isEditing ? null : fid)}>
+        <Button size="sm" variant="ghost" disabled={read(busy)} tooltip={selected ? modelLabel(selectedModel, selected) : undefined} onPress={() => set(editing, isEditing ? null : fid)}>
           {selected ? modelLabel(selectedModel, selected) : '选择模型'}
         </Button>
       </Row>
@@ -276,19 +277,21 @@ function modelPicker(fid: Fid, title: string, caption: string, currentModel: str
         </Box>
       )}
       {selected && efforts.length > 0 && (
-        <Row gap="xs" wrap align="center">
+        <Stack gap="xs">
           <Text size="xs" muted>思考档</Text>
-          {['', ...efforts].map((l) => {
-            const active = (effort ?? '') === l
-            return (
-              <Button key={l || 'default'} size="xs" variant={active ? 'solid' : 'ghost'} tone={active ? 'accent' : 'neutral'} disabled={read(busy)} onPress={() => {
-                const d2 = read(draft)[fid] ?? {}
-                set(draft, { ...read(draft), [fid]: { ...d2, effort: l || null } })
-                patch({ [fidKeys[fid][1]]: l || null })
-              }}>{l || '默认'}</Button>
-            )
-          })}
-        </Row>
+          <Row gap="xs" wrap>
+            {['', ...efforts].map((l) => {
+              const active = (effort ?? '') === l
+              return (
+                <Button key={l || 'default'} size="xs" variant={active ? 'solid' : 'ghost'} tone={active ? 'accent' : 'neutral'} disabled={read(busy)} onPress={() => {
+                  const d2 = read(draft)[fid] ?? {}
+                  set(draft, { ...read(draft), [fid]: { ...d2, effort: l || null } })
+                  patch({ [fidKeys[fid][1]]: l || null })
+                }}>{l || '默认'}</Button>
+              )
+            })}
+          </Row>
+        </Stack>
       )}
       {selected && !efforts.length && (
         <Text size="xs" muted>该模型未上报思考档,沿用默认。</Text>
@@ -309,39 +312,43 @@ function sessionCard(f?: FusionState, driver: DriverState | null = null) {
   const entry = read(session)
   const rows = read(sessionList)
   const picked = read(sessionFile)
-  if (entry?.error) return <Card title="OMP 会话"><Text size="sm" tone="warning">{entry.error}</Text></Card>
+  if (entry?.error) return <Card title="OMP 会话" description="当前会话的阶段与模型"><Text size="sm" tone="warning">{entry.error}</Text></Card>
   const s = entry?.data
   const shown = s?.file
   const current = visibleStage(s, f, driver)
   return (
-    <Card title="OMP 会话">
+    <Card title="OMP 会话" description="当前会话的阶段与模型">
       <Stack gap="sm">
         {rows.length > 1 && (
-          <Row gap="xs" wrap>
-            {rows.slice(0, 4).map((r) => {
-              const label = ((r.title ?? r.dir.split(/[\\/]/).pop() ?? '').replace(/^[\s]+/, '').slice(0, 14)) || '会话'
-              const isSel = (picked ?? rows[0].file) === r.file
-              return (
-                <Button key={r.file} size="xs" variant={isSel ? 'solid' : 'ghost'} onPress={() => set(sessionFile, r.file)}>
-                  {r.active ? '● ' : ''}{label} · {fmtAge(r.ageMs)}
-                </Button>
-              )
+          <Select
+            label="会话"
+            value={picked ?? rows[0]?.file}
+            options={rows.slice(0, 8).map((r) => {
+              const label = ((r.title ?? r.dir.split(/[\\/]/).pop() ?? '').replace(/^[\s]+/, '').slice(0, 28)) || '会话'
+              return { value: r.file, label: `${r.active ? '● ' : ''}${label} · ${fmtAge(r.ageMs)}` }
             })}
-          </Row>
+            onChange={(v) => set(sessionFile, v)}
+          />
         )}
-        {!shown && <EmptyState title="暂无 OMP 会话" description="有会话活动后,这里显示当前阶段、模型和切换记录。" icon="activity" />}
+        {!shown && <EmptyState title="暂无 OMP 会话" description="有会话活动后，这里显示当前阶段、模型和切换记录。" icon="activity" />}
         {shown && (
           <Stack gap="sm">
-            <Row justify="between" align="center">
-              <KeyValue items={[{ label: '当前模型', value: `${s?.currentModel ?? '未知'}${s?.currentThinking ? ` · ${s.currentThinking}` : ''}` }]} />
-              <Badge tone={stageTone(current.stage)}>{stageLabel(current.stage)}{current.model ? ` · ${current.model}` : ''}</Badge>
+            <Row justify="between" align="start" gap="sm">
+              <Stack gap="none">
+                <Text size="xs" muted>当前模型</Text>
+                <Text size="sm">{s?.currentModel ?? '未知'}{s?.currentThinking ? ` · ${s.currentThinking}` : ''}</Text>
+              </Stack>
+              <Badge tone={stageTone(current.stage)}>{stageLabel(current.stage)}</Badge>
             </Row>
             {s?.lastTool && <KeyValue items={[{ label: '最近工具', value: `${s.lastTool} · ${s.lastToolAt ? new Date(s.lastToolAt).toLocaleTimeString() : ''}` }]} />}
             {s && s.switches.length > 0 && (
               <Box padding="sm" radius="md" background="muted">
                 <Stack gap="xs">
-                  <Text size="xs" muted>模型切换历史</Text>
-                  {s.switches.slice(0, 8).map((sw, i) => (
+                  <Row justify="between" align="center">
+                    <Text size="xs" muted>模型切换历史</Text>
+                    <Text size="xs" muted>最近 {Math.min(s.switches.length, 5)} 条</Text>
+                  </Row>
+                  {s.switches.slice(0, 5).map((sw, i) => (
                     <Row key={i} justify="between" gap="xs">
                       <Text size="xs" muted>{sw.at ? new Date(sw.at).toLocaleTimeString() : ''}</Text>
                       <Text size="xs">{sw.model}{sw.thinking ? ` · ${sw.thinking}` : ''}</Text>
@@ -373,13 +380,10 @@ function sessionCard(f?: FusionState, driver: DriverState | null = null) {
 					<Tab value="orzic" label="Orzic">
 						<Stack gap="md">
 							<Row justify="between" align="center" gap="sm">
-								<Row align="center" gap="xs">
-									<Text size="sm" weight="medium">Fusion</Text>
-									<Text size="xs" muted>规划 → 执行 → 验收</Text>
-								</Row>
+								<Text size="sm" weight="medium">规划 → 执行 → 验收</Text>
 								{f && <Badge tone={f.enabled ? 'accent' : 'neutral'}>{f.enabled ? '规划路由开' : '规划路由关'}</Badge>}
 							</Row>
-							<Text size="xs" muted>开始任务后由规划模型只读规划；批准计划后恢复执行模型，验收仍在会话外。</Text>
+							<Text size="xs" muted>规划阶段只读，写完 PLAN.md 后切执行模型</Text>
 							{entry?.error && <Text size="sm" tone="warning">{entry.error}</Text>}
 							{read(modelError) && (
 								<Row justify="between" align="center" gap="sm">
@@ -401,41 +405,57 @@ function sessionCard(f?: FusionState, driver: DriverState | null = null) {
 								</Card>
 							)}
 							{entry?.data && f && (
-								<Card title="规划/执行模型" description="plan 角色 + 默认模型">
+								<Card title="路由">
 									<Stack gap="sm">
-										<Checkbox label="启用规划路由" description="任务进入 plan 模式规划，批准后恢复默认模型执行" checked={f.enabled} disabled={read(busy)} onChange={(checked) => patch({ enabled: checked })} />
-										{modelPicker('from', '规划模型', 'plan 角色 · 只读规划', f.from, f.fromEffort, models)}
-										<Separator />
-										{modelPicker('into', '执行模型', '默认模型 · 批准后接手实现', f.into, f.intoEffort, models)}
-										<Separator />
-										<Checkbox label="子代理同规则" description="内置 task 子代理也启用(task.prewalk)" checked={f.taskPrewalk} disabled={read(busy)} onChange={(checked) => patch({ taskPrewalk: checked })} />
+										<Checkbox label="启用规划路由" description="新任务先由规划模型只读规划" checked={f.enabled} disabled={read(busy)} onChange={(checked) => patch({ enabled: checked })} />
+										<Checkbox label="子代理启用 prewalk" description="内置 task 子代理按 OMP prewalk 切执行模型" checked={f.taskPrewalk} disabled={read(busy)} onChange={(checked) => patch({ taskPrewalk: checked })} />
 									</Stack>
 								</Card>
 							)}
 							{entry?.data && f && (
-								<Card title="验收" description="独立第三模型审查产出">
+								<Card title="模型" description="规划用 plan，执行用 default">
 									<Stack gap="sm">
-										<Checkbox label="advisor 验收" description="逐回合审查(advisor)" checked={f.advisor} disabled={read(busy)} onChange={(c) => patch({ advisor: c })} />
-										{f.advisor && modelPicker('advisor', '验收模型', '默认跟随规划模型,可独立选', f.advisorModel ?? f.from, f.advisorEffort ?? f.fromEffort, models)}
-										<Separator />
-										<Checkbox label="ocr 判定式验收" description="rule.json + ocr review,PASS/REWORK 判定" checked={f.ocr} disabled={read(busy)} onChange={(c) => patch({ ocr: c })} />
-										{f.ocr && modelPicker('ocr', '审查模型', 'ocr 判定式审查(需 ocr 端点能调到)', f.ocrModel, f.ocrEffort, models)}
-										{f.ocr && <Input label="rule.json" value={f.rulePath ?? ''} onChange={(v) => patch({ rulePath: String(v) })} />}
-										{f.ocr && <Input label="check 命令(确定性门禁)" value={f.checkCmd ?? ''} onChange={(v) => patch({ checkCmd: String(v) })} />}
-										{f.ocr && <Checkbox label="执行完自动验收" description="轮次写完代码后自动跑 ocr review" checked={f.autoReview} disabled={read(busy)} onChange={(c) => patch({ autoReview: c })} />}
-										{f.ocr && f.autoReview && <Checkbox label="REWORK 自动返工" description="验收不通过把 findings 注入会话返工(最多 3 轮)" checked={f.autoRework} disabled={read(busy)} onChange={(c) => patch({ autoRework: c })} />}
-									{f.ocr && (
-										<Row justify="between" align="center">
-											<Button size="sm" disabled={read(reviewing) || read(busy)} onPress={() => void runReview()}>
-												{read(reviewing) ? '审查中…' : '运行验收'}
-											</Button>
-											{read(reviewResult) && (
-												<Badge tone={({ pass: 'success', rework: 'danger', unreviewed: 'neutral', 'no-repo': 'warning', failed: 'danger' } as Record<string, 'success' | 'danger' | 'neutral' | 'warning'>)[read(reviewResult)!.verdict] ?? 'neutral'}>
-													{({ pass: 'PASS', rework: 'REWORK', unreviewed: '未审查', 'no-repo': '无仓库', failed: '失败' } as Record<string, string>)[read(reviewResult)!.verdict] ?? read(reviewResult)!.verdict}
-												</Badge>
-											)}
-										</Row>
-									)}
+										<Box padding="sm" radius="md" background="muted">
+											{modelPicker('from', '规划模型', '只读规划', f.from, f.fromEffort, models, 'plan')}
+										</Box>
+										<Box padding="sm" radius="md" background="muted">
+											{modelPicker('into', '执行模型', '接手实现', f.into, f.intoEffort, models, 'default')}
+										</Box>
+									</Stack>
+								</Card>
+							)}
+							{entry?.data && f && (
+								<Card title="验收" description="独立模型审查产出，可自动返工">
+									<Stack gap="sm">
+										<Box padding="sm" radius="md" background="muted">
+											<Stack gap="sm">
+												<Checkbox label="advisor 验收" description="逐回合审查（advisor 模型）" checked={f.advisor} disabled={read(busy)} onChange={(c) => patch({ advisor: c })} />
+												{f.advisor && modelPicker('advisor', '验收模型', '默认跟随规划模型', f.advisorModel ?? f.from, f.advisorEffort ?? f.fromEffort, models, 'advisor')}
+											</Stack>
+										</Box>
+										<Box padding="sm" radius="md" background="muted">
+											<Stack gap="sm">
+												<Checkbox label="ocr 判定式验收" description="按 rule.json 与 findings 判定 PASS / REWORK" checked={f.ocr} disabled={read(busy)} onChange={(c) => patch({ ocr: c })} />
+												{f.ocr && modelPicker('ocr', '审查模型', '需要 ocr 端点可用', f.ocrModel, f.ocrEffort, models, 'ocr')}
+												{f.ocr && <Input label="rule.json" value={f.rulePath ?? ''} onChange={(v) => patch({ rulePath: String(v) })} />}
+												{f.ocr && <Input label="check 命令（确定性门禁）" value={f.checkCmd ?? ''} onChange={(v) => patch({ checkCmd: String(v) })} />}
+												{f.ocr && <Checkbox label="执行完自动验收" description="写完代码的轮次自动跑 ocr review" checked={f.autoReview} disabled={read(busy)} onChange={(c) => patch({ autoReview: c })} />}
+												{f.ocr && f.autoReview && <Checkbox label="REWORK 自动返工" description="把 findings 注入会话返工（最多 3 轮）" checked={f.autoRework} disabled={read(busy)} onChange={(c) => patch({ autoRework: c })} />}
+											</Stack>
+										</Box>
+										{f.ocr && <Separator />}
+										{f.ocr && (
+											<Row justify="between" align="center">
+												<Button size="sm" disabled={read(reviewing) || read(busy)} onPress={() => void runReview()}>
+													{read(reviewing) ? '审查中…' : '运行验收'}
+												</Button>
+												{read(reviewResult) && (
+													<Badge tone={({ pass: 'success', rework: 'danger', unreviewed: 'neutral', 'no-repo': 'warning', failed: 'danger' } as Record<string, 'success' | 'danger' | 'neutral' | 'warning'>)[read(reviewResult)!.verdict] ?? 'neutral'}>
+														{({ pass: 'PASS', rework: 'REWORK', unreviewed: '未审查', 'no-repo': '无仓库', failed: '失败' } as Record<string, string>)[read(reviewResult)!.verdict] ?? read(reviewResult)!.verdict}
+													</Badge>
+												)}
+											</Row>
+										)}
 									{read(reviewResult) && (
 										<Box padding="sm" radius="md" background="muted">
 											<Stack gap="xs">
