@@ -266,6 +266,16 @@ test('agent_end: a blocked planning write does not spawn review', async () => {
   assert.equal(existsSync(join(env.agent, 'spawn.json')), false)
 })
 
+test('agent_end: a failed bash still spawns review because it may have committed', async () => {
+  const env = setup()
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'e5.jsonl'))
+  await env.fire('agent_start', {}, ctx)
+  await env.fire('tool_call', { toolCallId: 'sh-1', toolName: 'bash', input: { command: 'git commit -m wip && npm test' } }, ctx)
+  await env.fire('tool_execution_end', { toolCallId: 'sh-1', toolName: 'bash', isError: true, result: {} }, ctx)
+  await env.fire('agent_end', { willContinue: false }, ctx)
+  assert.equal(existsSync(join(env.agent, 'spawn.json')), true)
+})
+
 test('agent_end: a failed write does not spawn review', async () => {
   const env = setup()
   const ctx = env.ctxFor(join(env.agent, 'sessions', 'e3.jsonl'))

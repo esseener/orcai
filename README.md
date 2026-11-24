@@ -32,7 +32,7 @@ OMP 的规划/执行侧栏调度器 + 自动验收循环。新请求先交给规
 
 ### 自动验收循环(`orzic-driver.mjs`)
 
-`orzic-loop.ts`(OMP 扩展)在 `agent_end` 检测本轮是否调用过受识别的写入工具(`edit`/`write`/`bash`/`ast_edit`/`eval`/`notebook`)以及 `autoReview` → spawn **detached `orzic-driver.mjs`**。这里记录的是工具调用,不是校验文件是否真的变化;driver 跑在 OMP 进程外：
+`orzic-loop.ts`(OMP 扩展)在 `agent_end` 检测本轮是否实际执行过受识别的写入工具。结构化 `edit`/`write`/`ast_edit`/`notebook` 需 `isError=false`；`bash`/`eval` 只要实际执行过就算（非零退出也可能已经提交或改文件），最终由 driver 按实际 `HEAD` diff 判定；`PLAN.md` 写入和规划期被阻断的调用不触发。以及 `autoReview` → spawn **detached `orzic-driver.mjs`**。这里记录的是工具调用,不是校验文件是否真的变化;driver 跑在 OMP 进程外：
 
 1. `git diff HEAD~1..HEAD` → `omp --mode json` 评审 → 写 `~/.omp/agent/orzic-review-<key>.json`
 2. verdict `rework` + `autoRework` → `omp -r <session>` 注入 findings 返工(≤ `maxRework` 轮)

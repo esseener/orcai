@@ -94,7 +94,7 @@ export default function (pi: Pi): void {
   const planning = new Map<string, { cwd: string }>()
   const executing = new Set<string>()
   const pendingPlanWrites = new Map<string, { session: string; cwd: string; target: string; content: string | null }>()
-  const pendingWrites = new Map<string, { session: string; isPlan: boolean }>()
+  const pendingWrites = new Map<string, { session: string; isPlan: boolean; shell: boolean }>()
 
   const pinSession = (ctx?: PiCtx): string => {
     try {
@@ -237,7 +237,8 @@ export default function (pi: Pi): void {
     const plan = f ? planning.get(f) : undefined
     if (!plan) {
       if (f && WRITE_TOOLS.has(name) && e.toolCallId) {
-        pendingWrites.set(e.toolCallId, { session: f, isPlan: MUTATING.has(name) && isPlanTarget(target) })
+        const shell = name === 'bash' || name === 'eval'
+        pendingWrites.set(e.toolCallId, { session: f, isPlan: !shell && MUTATING.has(name) && isPlanTarget(target), shell })
       }
       return
     }
@@ -250,7 +251,7 @@ export default function (pi: Pi): void {
         content = String(input.content ?? '')
         if (!content.trim()) return { block: true, reason: '计划内容为空；请先把完整计划写入 PLAN.md。' }
       }
-      pendingWrites.set(e.toolCallId, { session: f, isPlan: true })
+      pendingWrites.set(e.toolCallId, { session: f, isPlan: true, shell: false })
       // Do not switch here: the tool may still fail or be cancelled. The
       // matching tool_execution_end decides, and agent_end never approves a
       // historical PLAN.md.
@@ -263,7 +264,11 @@ export default function (pi: Pi): void {
     const write = pendingWrites.get(e.toolCallId)
     if (write) {
       pendingWrites.delete(e.toolCallId)
-      if (e.isError !== true && write.session === pinSession(ctx) && !write.isPlan) wroteSessions.add(write.session)
+      // A nonzero bash/eval exit does not prove the side effect was absent: the
+      // command may have committed first, then failed a test. Only structured
+      // edit/write tools treat isError as "nothing happened".
+      const mayHaveWritten = write.shell || e.isError !== true
+      if (mayHaveWritten && write.session === pinSession(ctx) && !write.isPlan) wroteSessions.add(write.session)
     }
     const pending = pendingPlanWrites.get(e.toolCallId)
     if (!pending) return
