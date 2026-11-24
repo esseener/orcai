@@ -7,11 +7,12 @@ import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, isAbsolute, join } from 'node:path'
 
 type PiModel = { provider?: string; id?: string }
 type PiEvent = {
   prompt?: string; toolName?: string; willContinue?: boolean
+  toolCallId?: string; isError?: boolean
   input?: Record<string, unknown>
 }
 type PiCtx = {
@@ -92,6 +93,7 @@ export default function (pi: Pi): void {
   const pinCwds = new Map<string, string>()
   const planning = new Map<string, { cwd: string }>()
   const executing = new Set<string>()
+  const pendingPlanWrites = new Map<string, { session: string; cwd: string; target: string; content: string | null }>()
 
   const pinSession = (ctx?: PiCtx): string => {
     try {
@@ -151,6 +153,9 @@ export default function (pi: Pi): void {
   // after a PLAN.md handoff inherits the execution phase; this keeps review and
   // planning requests on the planner instead of guessing from keywords/length.
   const continuation = /^(?:继续(?:执行|实现)?|按计划(?:执行|实现)?|开始(?:执行|实现)?|执行计划|好(?:的)?|可以|行|ok|continue|proceed)[。！!.\s]*$/i
+  const isPlanTarget = (target: string): boolean => /(?:^|[\\/:])PLAN\.md$/i.test(target)
+  const planFilePath = (cwd: string, target: string): string =>
+    /^local:\/\//i.test(target) ? target : isAbsolute(target) ? target : join(cwd, target)
 
   const planPath = (key: string): string => join(agentRoot(), `orzic-plan-${key}.json`)
   const writePlan = (ctx: PiCtx, content: string): void => {
@@ -175,6 +180,7 @@ export default function (pi: Pi): void {
     boot(`session_start sf=${f}`)
     planning.delete(f)
     executing.delete(f)
+    pendingPlanWrites.clear()
     const cfg = readCfg()
     if (!cfg.autoRoute || process.env.ORZIC_DRIVER || !cfg.planner) return
     const ok = await useModel(ctx, cfg.planner)
@@ -226,32 +232,56 @@ export default function (pi: Pi): void {
     if (f && WRITE_TOOLS.has(name)) wroteSessions.add(f)
     const plan = f ? planning.get(f) : undefined
     if (!plan) return
-    if (name === 'bash') return { block: true, reason: '规划阶段只读；计划完成后会自动切换到执行模型。' }
+    if (name === 'bash' || name === 'eval') return { block: true, reason: '规划阶段只读；计划完成后会自动切换到执行模型。' }
     if (name === 'write' || name === 'edit' || name === 'ast_edit' || name === 'notebook') {
-      if (!/(?:^|[\\/:])PLAN\.md$/i.test(target)) return { block: true, reason: '规划阶段只允许写 PLAN.md；先完成计划。' }
+      if (!isPlanTarget(target)) return { block: true, reason: '规划阶段只允许写 PLAN.md；先完成计划。' }
+      if (!e.toolCallId) return { block: true, reason: '无法关联工具调用 ID，规划阶段不允许写入。' }
+      let content: string | null = null
       if (name === 'write') {
-        const content = String(input.content ?? '')
+        content = String(input.content ?? '')
         if (!content.trim()) return { block: true, reason: '计划内容为空；请先把完整计划写入 PLAN.md。' }
-        writePlan(ctx, content)
       }
-      const ok = await useModel(ctx, readCfg().executor)
-      boot(`plan switch selector=${readCfg().executor} ok=${ok} model=${ctx.model?.provider}/${ctx.model?.id}`)
-      if (ok) { planning.delete(f); executing.add(f) }
+      // Do not switch here: the tool may still fail or be cancelled. The
+      // matching tool_execution_end decides, and agent_end never approves a
+      // historical PLAN.md.
+      pendingPlanWrites.set(e.toolCallId, { session: f, cwd: ctx.cwd, target, content })
     }
   })
 
-  pi.on('agent_end', (e, ctx) => {
+  pi.on('tool_execution_end', async (e, ctx) => {
+    if (!e.toolCallId) return
+    const pending = pendingPlanWrites.get(e.toolCallId)
+    if (!pending) return
+    pendingPlanWrites.delete(e.toolCallId)
+    if (e.isError === true) { boot(`plan write failed session=${pending.session}`); return }
     const f = pinSession(ctx)
-    const plan = f ? planning.get(f) : undefined
-    if (plan) {
-      try {
-        const p = join(plan.cwd, 'PLAN.md')
-        if (existsSync(p)) writePlan(ctx, readFileSync(p, 'utf8'))
-      } catch { /* best effort */ }
-      if (f) planning.delete(f)
+    if (pending.session !== f || !planning.has(f)) return
+    let content = pending.content
+    if (content === null) {
+      const file = planFilePath(pending.cwd, pending.target)
+      if (/^local:\/\//i.test(file)) { boot('plan read skipped: local target has no captured content'); return }
+      try { content = readFileSync(file, 'utf8') } catch { content = null }
     }
+    if (!content || !content.trim()) {
+      ctx.ui?.notify?.('Orzic: PLAN.md 为空或读不到，保持规划阶段。', 'warning')
+      return
+    }
+    const selector = readCfg().executor
+    const ok = await useModel(ctx, selector)
+    boot(`handoff session=${f} selector=${selector} ok=${ok}`)
+    if (!ok) {
+      ctx.ui?.notify?.(`Orzic: 执行模型不可用 ${selector}`, 'warning')
+      ctx.abort?.()
+      return
+    }
+    writePlan(ctx, content)
+    planning.delete(f)
+    executing.add(f)
+  })
+
+  pi.on('agent_end', (e, ctx) => {
     if (e?.willContinue === true) return
-    const self = f
+    const self = pinSession(ctx)
     const acc = readCfg()
     const agentRootDir = process.env.ORZIC_AGENT_DIR || join(homedir(), '.omp', 'agent')
     const log = (m: string) => { try { mkdirSync(agentRootDir, { recursive: true }); writeFileSync(join(agentRootDir, 'orzic-loop.log'), `${new Date().toISOString()} ${m}\n`, { flag: 'a' }) } catch { /* best effort */ } }

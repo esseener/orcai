@@ -2,7 +2,7 @@
 
 # Orzic
 
-OMP 原生 plan mode 的侧栏调度器 + 自动验收循环。面板「开始任务」把任务交给规划模型，规划阶段只读；批准计划后退出 plan mode，自动恢复默认执行模型，同一会话继续实现。验收在会话外由独立 judge 对着 diff 和已批准的计划判定。
+OMP 的规划/执行侧栏调度器 + 自动验收循环。新请求先交给规划模型只读规划；`PLAN.md` 写入工具成功返回且计划非空后，同一会话切执行模型，之后只有明确继续才留在执行阶段。验收在会话外由独立 judge 对着 diff 和**本会话**已批准的计划判定。
 
 ## 面板标签
 
@@ -65,8 +65,18 @@ orca plugin open local.orzic --panel orzic --json
 
 ```powershell
 npm run typecheck
-node --test src/orzic-driver.test.mjs src/orzic-verdict.test.mjs src/orzic-models.test.mjs
+node --test src/orzic-loop.test.mjs src/orzic-driver.test.mjs src/orzic-verdict.test.mjs src/orzic-models.test.mjs
 ```
+
+## 验证记录（本次路由返工）
+
+- `npx tsc -p .` 通过；路由测试 19 项，全套 `node --test src/*.test.mjs` 通过。
+- 独立临时 OMP（隔离 `ORZIC_AGENT_DIR` 与 `--session-dir`，`ORZIC_DRIVER` 未设置）：
+  - 钣金拆解原句 → `route phase=planning selector=openai-codex/gpt-6-luna ok=true`，assistant 模型 `gpt-6-luna`。
+  - 成功写 `PLAN.md` → 写入完成后才出现 `handoff ... selector=magpie/auto/deepseek-v4.1-flash ok=true`，后续 assistant 模型为 DeepSeek，计划快照生成。
+  - 规划模型不可用 → 无 session 文件、无 assistant 回复（`ctx.abort()` 停轮）。
+  - 历史 `PLAN.md` 存在但本轮未写 → 不生成快照，仍由规划模型回答。
+- 扩展经 `orca plugin restart local.orzic` 同步；`~/.omp/agent/extensions/orzic-loop.ts` 与 `src/orzic-loop.ts` 字节一致。**运行中的 OMP 必须重启（Ctrl+C 后重开）才会加载新版扩展。**
 
 ## 结构
 
@@ -78,7 +88,7 @@ node --test src/orzic-driver.test.mjs src/orzic-verdict.test.mjs src/orzic-model
 | `src/panel.tsx` | 侧栏:fusion 配置 / 会话卡 / 验收开关+手动验收 / driver 状态条+停止+强杀;配置与模型目录分两路加载 |
 | `src/protocol.ts` | `PluginRequests` 声明 + `AcceptanceCfg`/`ReviewVerdict`/`Finding`/`ReviewOut`/`FusionState`/`SessionStatus` |
 | `src/orzic-models.mjs` | `omp models ls` 的缓存 + single-flight:并发/重试共享一次 CLI,失败拒绝而不是返回空目录 |
-| `src/orzic-loop.ts` | OMP 扩展:新请求切规划模型、只有明确继续才用执行模型;`tool_call` 阻断规划期写入（仅 `PLAN.md`）;`agent_end` 捕获 `ctx.sessionManager.getSessionFile()` → 写 `ORZIC_SESSION_FILE` env → spawn detached driver |
+| `src/orzic-loop.ts` | OMP 扩展:新请求切规划模型、只有明确继续才用执行模型;`tool_call` 阻断规划期 `bash`/`eval` 与 PLAN.md 外写入;`tool_execution_end` 确认写入成功且计划非空后才保存快照并切执行;`agent_end` 只启动会话外验收驱动,不从历史文件补办批准 |
 | `src/orzic-driver.mjs` | Detached Node driver:锁 + session pin + gitDiff → judge(omp)→ verdict 写盘 → rework 则 `omp -r` 注入;每轮重读 `orzic-acceptance.json` |
 | `src/orzic-verdict.mjs` | `--mode json` ndjson → `message_end` assistant text → verdict(`pass`/`rework`/`failed`/`unreviewed`)严格解析,失败不 pass |
 | `src/orzic-models.mjs` | 模型目录 60s 缓存 + 单飞;`omp models ls` 失败/超时向上抛错,不降级成空列表 |
@@ -88,8 +98,8 @@ node --test src/orzic-driver.test.mjs src/orzic-verdict.test.mjs src/orzic-model
 
 ## 已知边界
 
-- 计划快照在批准时从 `local://` 的 artifacts 目录重读最终文件；读不到则标记未批准，judge 不使用草稿。批准choice只认 `keep`/`compact`/`execute`。
-- `omp -r` 注入的是**当前 OMP session 文件**;同一 cwd 多个会话时只认 `ORZIC_SESSION_FILE` pin,pin 失败降级为 review-only 而不是猜。
+- 计划快照只在**本会话**的 `PLAN.md` 写入工具成功返回（`tool_execution_end` 且 `isError=false`）且最终内容非空时保存；`agent_end` 不会把历史 `PLAN.md` 当成已批准计划。`local://PLAN.md` 仅支持 `write`（用捕获的写入内容），`edit`/`ast_edit` 需要能从磁盘读到最终文件。
+- `omp -r` 注入的是**当前 OMP session 文件**;同一 cwd 多个会话时只认 `ORZIC_SESSION_FILE` pin,pin 失败降级为 review-only 而不是猜。由 driver 启动的 `omp -r` 返工轮带 `ORZIC_DRIVER=1`，按设计跳过规划/执行路由。
 - Driver 只读捕获时的 `HEAD~1..HEAD`;仅写文件但未提交时即使调用受识别工具触发 hook,也可能评审旧 HEAD 的提交差异;空提交没有可评审 diff。首次验证必须让 OMP 在本轮结束前创建新的非空 commit。
 - `prompt_submit` 不再发任何消息：回喂只走 driver 的 `omp -r`;会话内注入会和 driver 撞窗口、还可能把旧 verdict 喂给同 cwd 的兄弟会话。
 - verdict/lock/stop 文件按仓库分名(`orzic-review-<key>` 等):多 repo 可并发跑 driver。同一 cwd 下两个会话仍只认 `ORZIC_SESSION_FILE` pin 的那一个;`acceptance.result/stop` 依赖面板给出正确 `repo`。

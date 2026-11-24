@@ -57,6 +57,13 @@ const setup = (overrides = {}, models = [{ provider: 'planner', id: 'plan' }, { 
   return { agent, cwd, ctxFor, fire, plans, setModels, aborts, levels }
 }
 
+const completePlanWrite = async (env, ctx, { content = '# PLAN', id = 'call-1', isError = false } = {}) => {
+  const blocked = await env.fire('tool_call', { toolCallId: id, toolName: 'write', input: { path: 'PLAN.md', content } }, ctx)
+  if (!isError) writeFileSync(join(env.cwd, 'PLAN.md'), content)
+  await env.fire('tool_execution_end', { toolCallId: id, toolName: 'write', isError, result: {} }, ctx)
+  return blocked
+}
+
 test('session_start: shows the planner model by default', async () => {
   const env = setup()
   const ctx = env.ctxFor(join(env.agent, 'sessions', 's.jsonl'))
@@ -83,22 +90,72 @@ test('a new session treats a short message as planning, not execution', async ()
   assert.equal(env.plans().length, 0)
 })
 
-test('after a PLAN.md handoff, an explicit continuation keeps the executor', async () => {
+test('after a completed PLAN.md write, an explicit continuation keeps the executor', async () => {
   const env = setup()
   const ctx = env.ctxFor(join(env.agent, 'sessions', 'a2.jsonl'))
   await env.fire('before_agent_start', { prompt: '重构验收循环，拆解成步骤再实现' }, ctx)
-  await env.fire('tool_call', { toolName: 'write', input: { path: 'PLAN.md', content: '# PLAN' } }, ctx)
+  await completePlanWrite(env, ctx)
   await env.fire('before_agent_start', { prompt: '继续' }, ctx)
   assert.deepEqual(env.setModels, ['planner/plan', 'executor/code', 'executor/code'])
+})
+
+test('a failed PLAN.md write never switches to the executor', async () => {
+  const env = setup()
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'a2f.jsonl'))
+  await env.fire('before_agent_start', { prompt: '重构验收循环，拆解成步骤再实现' }, ctx)
+  await completePlanWrite(env, ctx, { isError: true })
+  assert.deepEqual(env.setModels, ['planner/plan'])
+  assert.equal(env.plans().length, 0)
+  const bash = await env.fire('tool_call', { toolCallId: 'x', toolName: 'bash', input: { command: 'ls' } }, ctx)
+  assert.equal(bash?.block, true)
+})
+
+test('an empty PLAN.md write is blocked and does not hand off', async () => {
+  const env = setup()
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'a2e.jsonl'))
+  await env.fire('before_agent_start', { prompt: '重构验收循环，拆解成步骤再实现' }, ctx)
+  const blocked = await env.fire('tool_call', { toolCallId: 'empty', toolName: 'write', input: { path: 'PLAN.md', content: '   ' } }, ctx)
+  assert.equal(blocked?.block, true)
+  await env.fire('tool_execution_end', { toolCallId: 'empty', toolName: 'write', isError: false, result: {} }, ctx)
+  assert.deepEqual(env.setModels, ['planner/plan'])
+  assert.equal(env.plans().length, 0)
+})
+
+test('an executor that cannot be applied aborts and keeps planning', async () => {
+  const env = setup({}, undefined, { deny: ['executor/code'] })
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'a2x.jsonl'))
+  await env.fire('before_agent_start', { prompt: '重构验收循环，拆解成步骤再实现' }, ctx)
+  await completePlanWrite(env, ctx)
+  assert.equal(env.aborts.length, 1)
+  assert.equal(env.plans().length, 0)
+  const bash = await env.fire('tool_call', { toolCallId: 'x2', toolName: 'bash', input: { command: 'ls' } }, ctx)
+  assert.equal(bash?.block, true)
 })
 
 test('after a handoff, a new review request returns to the planner', async () => {
   const env = setup()
   const ctx = env.ctxFor(join(env.agent, 'sessions', 'a3.jsonl'))
   await env.fire('before_agent_start', { prompt: '重构验收循环，拆解成步骤再实现' }, ctx)
-  await env.fire('tool_call', { toolName: 'write', input: { path: 'PLAN.md', content: '# PLAN' } }, ctx)
+  await completePlanWrite(env, ctx)
   await env.fire('before_agent_start', { prompt: '再审查一下整个项目，做个计划' }, ctx)
   assert.equal(env.setModels.at(-1), 'planner/plan')
+})
+
+test('a prefixed continuation is a new request and returns to the planner', async () => {
+  const env = setup()
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'a3p.jsonl'))
+  await env.fire('before_agent_start', { prompt: '重构验收循环，拆解成步骤再实现' }, ctx)
+  await completePlanWrite(env, ctx)
+  await env.fire('before_agent_start', { prompt: '继续审查并做计划' }, ctx)
+  assert.equal(env.setModels.at(-1), 'planner/plan')
+})
+
+test('a continuation while still planning stays on the planner', async () => {
+  const env = setup()
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'a3c.jsonl'))
+  await env.fire('before_agent_start', { prompt: '重构验收循环，拆解成步骤再实现' }, ctx)
+  await env.fire('before_agent_start', { prompt: '继续' }, ctx)
+  assert.deepEqual(env.setModels, ['planner/plan', 'planner/plan'])
 })
 
 test('an unavailable planner aborts and never applies the executor', async () => {
@@ -126,38 +183,50 @@ test('plan: routes to planner and blocks non-plan writes and bash', async () => 
   assert.equal(write?.block, true)
   const bash = await env.fire('tool_call', { toolName: 'bash', input: { command: 'ls' } }, ctx)
   assert.equal(bash?.block, true)
+  const ev = await env.fire('tool_call', { toolName: 'eval', input: { code: 'open("x","w").write("y")' } }, ctx)
+  assert.equal(ev?.block, true)
 })
 
-test('plan: writing PLAN.md snapshots it and switches to executor', async () => {
+test('plan: a completed PLAN.md write snapshots it and switches to executor', async () => {
   const env = setup()
   const session = join(env.agent, 'sessions', 'c.jsonl')
   const ctx = env.ctxFor(session)
   await env.fire('before_agent_start', { prompt: '重构验收循环，拆解成步骤再实现' }, ctx)
-  await env.fire('tool_call', { toolName: 'write', input: { path: 'PLAN.md', content: '# PLAN\n步骤' } }, ctx)
+  await completePlanWrite(env, ctx, { content: '# PLAN\n步骤' })
   assert.deepEqual(env.setModels, ['planner/plan', 'executor/code'])
   const [file] = env.plans()
   const d = JSON.parse(readFileSync(join(env.agent, file), 'utf8'))
   assert.equal(d.approved, true)
   assert.equal(d.sessionFile, session)
   assert.match(d.digest, /^[0-9a-f]{64}$/)
+  assert.match(d.planContent, /步骤/)
 })
 
-test('plan: agent_end snapshots an edited PLAN.md', async () => {
+test('plan: agent_end does not approve a PLAN.md left by an earlier session', async () => {
   const env = setup()
   const ctx = env.ctxFor(join(env.agent, 'sessions', 'd.jsonl'))
   await env.fire('before_agent_start', { prompt: '重构验收循环，拆解成步骤再实现' }, ctx)
-  writeFileSync(join(env.cwd, 'PLAN.md'), '# EDITED')
+  writeFileSync(join(env.cwd, 'PLAN.md'), '# HISTORICAL')
   await env.fire('agent_end', { willContinue: false }, ctx)
-  const [file] = env.plans()
-  const d = JSON.parse(readFileSync(join(env.agent, file), 'utf8'))
-  assert.match(d.planContent, /EDITED/)
+  assert.equal(env.plans().length, 0)
+  const bash = await env.fire('tool_call', { toolCallId: 'h', toolName: 'bash', input: { command: 'ls' } }, ctx)
+  assert.equal(bash?.block, true)
+})
+
+test('plan: agent_end with willContinue keeps planning state', async () => {
+  const env = setup()
+  const ctx = env.ctxFor(join(env.agent, 'sessions', 'd2.jsonl'))
+  await env.fire('before_agent_start', { prompt: '重构验收循环，拆解成步骤再实现' }, ctx)
+  await env.fire('agent_end', { willContinue: true }, ctx)
+  const bash = await env.fire('tool_call', { toolCallId: 'h2', toolName: 'bash', input: { command: 'ls' } }, ctx)
+  assert.equal(bash?.block, true)
 })
 
 test('plan: selectors with :effort still resolve', async () => {
   const env = setup({ planner: 'planner/plan:high', executor: 'executor/code:max' })
   const ctx = env.ctxFor(join(env.agent, 'sessions', 'g.jsonl'))
   await env.fire('before_agent_start', { prompt: '重构验收循环，拆解成步骤再实现' }, ctx)
-  await env.fire('tool_call', { toolName: 'write', input: { path: 'PLAN.md', content: '# PLAN' } }, ctx)
+  await completePlanWrite(env, ctx)
   assert.deepEqual(env.setModels, ['planner/plan', 'executor/code'])
   assert.deepEqual(env.levels, ['high', 'max'])
 })
