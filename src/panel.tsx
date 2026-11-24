@@ -1,4 +1,4 @@
-import { atom, Badge, Box, Button, Card, Checkbox, EmptyState, IconButton, Image, Input, KeyValue, List, ListItem, on, plugin, read, Row, Separator, set, Stack, Tab, Tabs, Text, Textarea, type PanelContext } from 'orca'
+import { atom, Badge, Box, Button, Card, Checkbox, EmptyState, IconButton, Image, Input, KeyValue, on, plugin, read, Row, Separator, set, Stack, Tab, Tabs, Text, Textarea, type PanelContext } from 'orca'
 import type { FusionState, OmpModel, SessionStage, SessionStatus } from './protocol'
 import { filterModelChoices, isFusionModel } from './orzic-models.mjs'
 
@@ -8,16 +8,16 @@ type ModelLoadState = 'idle' | 'loading' | 'ready' | 'error'
 const modelState = atom<ModelLoadState>('idle')
 const modelLoaded = atom(false)
 const modelError = atom<string | null>(null)
-const session = atom<{ data?: SessionStatus; error?: string } | null>(null)
-type SessionRow = { file: string; dir: string; ageMs: number; active: boolean; title: string | null; cwd: string | null }
-const sessionList = atom<SessionRow[]>([])
-const sessionFile = atom<string | null>('orzic.sessionFile', null, { persist: 'storage' })
-const sessionQuery = atom('')
-const followSession = atom(true)
-const reviewing = atom(false)
-const reviewResult = atom<{ verdict: string; summary: string; findings: { severity: string; file: string; line: number | null; message: string }[] } | null>(null)
-const driverState = atom<DriverState | null>(null)
+type SessionRow = { file: string; dir: string; ageMs: number; active: boolean; title: string | null; cwd: string | null; model: string | null; thinking: string | null; stage: SessionStage; lastTool: string | null; lastToolAt: string | null }
+type ReviewResult = { verdict: string; summary: string; findings: { severity: string; file: string; line: number | null; message: string }[] }
 type DriverState = { verdict: string; summary: string; findings: { severity: string; file: string; line: number | null; message: string }[]; at: string | null; round: number | null; consumed: boolean; driverAlive: boolean; driverPid: number | null }
+type SessionListState = { state: 'idle' | 'loading' | 'ready' | 'error'; error: string | null }
+const sessionList = atom<SessionRow[]>([])
+const sessionOrder = atom<string[]>([])
+const sessionListState = atom<SessionListState>({ state: 'idle', error: null })
+const reviewResults = atom<Record<string, ReviewResult>>({})
+const reviewingRepos = atom<Record<string, number>>({})
+const driverStates = atom<Record<string, DriverState>>({})
 
 type Note = { id: string; title: string; body: string; updatedAt: number }
 const notes = atom<Note[]>('orzic.notes', [], { persist: 'storage' })
@@ -69,30 +69,59 @@ async function copyNote(note: Note) {
 	}
 }
 
-// Repo resolution MUST NOT silently fall back to an arbitrary session — a session
-// from a DIFFERENT repo would point acceptance.review/stop at the wrong worktree.
-// Prefer the picked session's cwd; else the active session; else none.
+let panelAbort: AbortSignal | null = null
+const latestReview = new Map<string, number>()
+let reviewSeq = 0
+
+// Acceptance is repo-scoped. The active session's repo is the one the
+// acceptance controls act on; results stay keyed by repo.
 const currentRepo = (): string | undefined => {
   const rows = read(sessionList)
-  const picked = read(sessionFile)
-  if (picked) return rows.find((r) => r.file === picked)?.cwd ?? undefined
-  return rows.find((r) => r.active)?.cwd ?? undefined
+  return (rows.find((row) => row.active) ?? rows[0])?.cwd ?? undefined
 }
 
+// Manual review results belong to the repo that produced them. Switching to a
+// session in another repo hides them (the UI indexes by currentRepo), and a
+// late answer may only replace the latest run for the same repo.
 async function runReview() {
-  const cwd = currentRepo()
-  if (!cwd || read(reviewing)) return
-  set(reviewing, true); set(reviewResult, null)
+  const repo = currentRepo()
+  const sig = panelAbort
+  if (!repo || !sig || sig.aborted || read(reviewingRepos)[repo]) return
+  const seq = ++reviewSeq
+  latestReview.set(repo, seq)
+  set(reviewingRepos, { ...read(reviewingRepos), [repo]: seq })
   try {
-    const r = await plugin.request('acceptance.review', { repo: cwd }, { signal, timeoutMs: 115_000 })
-    set(reviewResult, r as { verdict: string; summary: string; findings: { severity: string; file: string; line: number | null; message: string }[] })
-  } catch (e) { set(reviewResult, { verdict: 'failed', summary: message(e), findings: [] }) }
-  finally { set(reviewing, false) }
+    const r = await plugin.request('acceptance.review', { repo }, { signal: sig, timeoutMs: 115_000 })
+    if (!sig.aborted && latestReview.get(repo) === seq) {
+      set(reviewResults, { ...read(reviewResults), [repo]: r as ReviewResult })
+    }
+  } catch (e) {
+    if (!sig.aborted && latestReview.get(repo) === seq) {
+      set(reviewResults, { ...read(reviewResults), [repo]: { verdict: 'failed', summary: message(e), findings: [] } })
+    }
+  } finally {
+    if (latestReview.get(repo) === seq) {
+      const current = read(reviewingRepos)
+      if (current[repo] === seq) {
+        const next = { ...current }
+        delete next[repo]
+        set(reviewingRepos, next)
+      }
+    }
+  }
+}
+
+async function stopAcceptance(force: boolean) {
+  const repo = currentRepo()
+  const sig = panelAbort
+  if (!repo || !sig || sig.aborted) return
+  try { await plugin.request('acceptance.stop', { repo, force }, { signal: sig, timeoutMs: 8_000 }) }
+  catch { /* best-effort; the next poll reflects the actual state */ }
 }
 const busy = atom(false)
 const editing = atom<string | null>(null)
 const draft = atom<Record<string, { model?: string; effort?: string | null; search?: string }>>({})
-const PLUGIN_VERSION = '0.1.19'
+const PLUGIN_VERSION = '0.1.20'
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function stageLabel(stage: SessionStage): string {
@@ -161,9 +190,66 @@ function patch(patch: { enabled?: boolean; from?: string; fromEffort?: string | 
     .finally(() => set(busy, false))
 }
 
-let listSeq = 0
-let acceptanceSeq = 0
+let listBusy = false
+let acceptanceAbort: AbortController | null = null
+let acceptanceRepo: string | null = null
+
+async function loadSessionList(sig: AbortSignal): Promise<SessionRow[] | null> {
+  if (listBusy) return null
+  listBusy = true
+  if (read(sessionListState).state === 'idle') set(sessionListState, { state: 'loading', error: null })
+  try {
+    const rows = await plugin.request('session.list', {}, { signal: sig, timeoutMs: 10_000 }) as SessionRow[]
+    if (sig.aborted) return null
+    // Keep known files in their slots and append new sessions. A deleted
+    // record simply stops appearing; a read failure never reaches this branch.
+    const order = mergeSessionOrder(read(sessionOrder), rows.map((row) => row.file))
+    set(sessionOrder, order)
+    const byFile = new Map(rows.map((row) => [row.file, row]))
+    const live = order.flatMap((file) => { const row = byFile.get(file); return row ? [row] : [] })
+    set(sessionList, live)
+    set(sessionListState, { state: 'ready', error: null })
+    return live
+  } catch (e) {
+    // Keep the last rows: a transient read failure is not a deleted session.
+    if (!sig.aborted) set(sessionListState, { state: 'error', error: message(e) })
+    return null
+  } finally {
+    listBusy = false
+  }
+}
+
+// Only one acceptance poll may be in flight. When the active repo changes,
+// abort the old request and start the new one; results stay keyed by repo.
+async function loadAcceptance(sig: AbortSignal) {
+  const repo = currentRepo()
+  if (!repo) {
+    acceptanceAbort?.abort()
+    acceptanceRepo = null
+    return
+  }
+  if (acceptanceAbort && acceptanceRepo === repo) return
+  acceptanceAbort?.abort()
+  const controller = new AbortController()
+  const forwardAbort = () => controller.abort()
+  sig.addEventListener('abort', forwardAbort, { once: true })
+  acceptanceAbort = controller
+  acceptanceRepo = repo
+  try {
+    const result = await plugin.request('acceptance.result', { repo }, { signal: controller.signal, timeoutMs: 8_000 })
+    if (!controller.signal.aborted && !sig.aborted && currentRepo() === repo) {
+      set(driverStates, { ...read(driverStates), [repo]: result as DriverState })
+    }
+  } catch { /* best-effort; the next poll retries */ }
+  finally {
+    sig.removeEventListener('abort', forwardAbort)
+    if (acceptanceAbort === controller) { acceptanceAbort = null; acceptanceRepo = null }
+  }
+}
+
 export function setup(ctx: PanelContext) {
+  panelAbort = ctx.signal
+  listBusy = false
   void refresh(ctx.signal)
   void fetchModels(ctx.signal)
   // `fusion.status` can fail transiently (worker restart, IPC drop) or keep
@@ -173,7 +259,6 @@ export function setup(ctx: PanelContext) {
   let statusRetryDelay = 5_000
   let statusRetryAt = Date.now() + statusRetryDelay
   let modelsRetryAt = Date.now() + 15_000
-  let sessionReady = false
   const tick = () => {
     if (ctx.signal.aborted) return
     const entry = read(status)
@@ -192,44 +277,20 @@ export function setup(ctx: PanelContext) {
       modelsRetryAt = Date.now() + 15_000
       void fetchModels(ctx.signal, true)
     }
-    const file = read(sessionFile)
-    if (read(followSession) && file && read(sessionList).some((row) => row.file === file)) {
-      void loadSession(file, true)
-    }
-    const seq = ++listSeq
-    plugin.request('session.list', {}, { signal: ctx.signal, timeoutMs: 10_000 })
-      .then((rows) => {
-        if (ctx.signal.aborted || seq !== listSeq) return
-        const merged = mergeSessionRows(read(sessionList), rows as SessionRow[])
-        set(sessionList, merged)
-        if (!sessionReady && merged.length) {
-          const picked = read(sessionFile)
-          sessionReady = true
-          if (picked && merged.some((row) => row.file === picked)) {
-            // A persisted pin gets its detail immediately; no wait for the next tick.
-            void loadSession(picked)
-          } else if (!picked) {
-            const first = merged.find((row) => row.active) ?? merged[0]
-            selectSession(first.file)
-          }
-        }
-      })
-      .catch(() => { /* list is best-effort */ })
-    const repo = currentRepo()
-    if (repo) {
-      const resultSeq = ++acceptanceSeq
-      plugin.request('acceptance.result', { repo }, { signal: ctx.signal, timeoutMs: 8_000 })
-        .then((r) => {
-          if (!ctx.signal.aborted && resultSeq === acceptanceSeq && currentRepo() === repo) set(driverState, r as DriverState)
-        })
-        .catch(() => { /* result is best-effort */ })
-    } else if (read(driverState) !== null) {
-      set(driverState, null)
-    }
+    void loadSessionList(ctx.signal)
+    void loadAcceptance(ctx.signal)
   }
   tick()
   const timer = setInterval(tick, 3000)
-  ctx.signal.addEventListener('abort', () => clearInterval(timer))
+  const stop = () => {
+    if (panelAbort !== ctx.signal) return
+    clearInterval(timer)
+    panelAbort = null
+    acceptanceAbort?.abort()
+    acceptanceRepo = null
+    listBusy = false
+  }
+  ctx.signal.addEventListener('abort', stop, { once: true })
 }
 
 const signal = new AbortController().signal
@@ -331,14 +392,11 @@ function modelPicker(fid: Fid, title: string, caption: string, currentModel: str
   )
 }
 
-// Keep existing rows in their slots; append only sessions we have not seen.
-// Prepending new rows made the whole rail shift while a session was open.
-export function mergeSessionRows(previous: SessionRow[], next: SessionRow[]): SessionRow[] {
-  const incoming = new Map(next.map((row) => [row.file, row]))
-  const kept = previous.filter((row) => incoming.has(row.file)).map((row) => incoming.get(row.file)!)
-  const known = new Set(previous.map((row) => row.file))
-  const added = next.filter((row) => !known.has(row.file))
-  return [...kept, ...added]
+// Keep every file we have seen, in its original slot. A session that vanishes
+// for a poll and comes back must not be appended as if it were new.
+export function mergeSessionOrder(previous: string[], current: string[]): string[] {
+  const seen = new Set(previous)
+  return [...previous, ...current.filter((file) => !seen.has(file))]
 }
 
 function sessionTitle(row: SessionRow): string {
@@ -351,143 +409,49 @@ function projectName(cwd: string | null): string {
   return cwd ? cwd.split(/[\\/]/).filter(Boolean).pop() ?? '' : ''
 }
 
-// One status request at a time for polling; a click may still start a fresh
-// read immediately. Every response is tagged with the session it belongs to,
-// so a slow answer for the previous selection can never overwrite the new one.
-let sessionSeq = 0
-let sessionBusy = false
-async function loadSession(file: string, poll = false) {
-  if (poll && sessionBusy) return
-  const seq = ++sessionSeq
-  sessionBusy = true
-  try {
-    const data = await plugin.request('session.status', { file }, { signal, timeoutMs: 10_000 })
-    if (!signal.aborted && seq === sessionSeq && read(sessionFile) === file && read(followSession)) {
-      set(session, { data: data as SessionStatus })
-    }
-  } catch (e) {
-    if (!signal.aborted && seq === sessionSeq && read(sessionFile) === file && read(followSession)) {
-      set(session, { error: message(e) })
-    }
-  } finally {
-    if (seq === sessionSeq) sessionBusy = false
-  }
-}
-
-function selectSession(file: string) {
-  const beforeRepo = currentRepo()
-  const row = read(sessionList).find((item) => item.file === file)
-  const changed = read(sessionFile) !== file
-  if (changed) set(session, null)
-  set(sessionFile, file)
-  set(followSession, true)
-  // Acceptance is scoped to a repo; do not carry another repo's verdict over.
-  if (beforeRepo !== (row?.cwd ?? undefined)) { set(reviewResult, null); set(driverState, null) }
-  void loadSession(file)
-}
-
-function toggleFollow() {
-  const next = !read(followSession)
-  set(followSession, next)
-  if (next) {
-    const file = read(sessionFile)
-    if (file && read(sessionList).some((row) => row.file === file)) void loadSession(file)
-  }
-}
-
-function sessionCard(f?: FusionState, driver: DriverState | null = null) {
-  const entry = read(session)
-  const rows = read(sessionList)
-  const picked = read(sessionFile)
-  const s = entry?.data
-  const shown = s?.file
-  const current = visibleStage(s, f, driver)
-  const pickedRow = picked ? rows.find((row) => row.file === picked) : undefined
-  const fallback = rows.find((row) => row.active) ?? rows[0]
-  const query = read(sessionQuery).trim().toLowerCase()
-  const filteredRows = query
-    ? rows.filter((row) => [sessionTitle(row), projectName(row.cwd), row.file].some((value) => value.toLowerCase().includes(query)))
-    : rows
+function sessionsCard(rows: SessionRow[], listState: SessionListState) {
+  const active = rows.filter((row) => row.active).length
   return (
-    <Card title="OMP 会话" description="所有会话原地更新；点击固定查看，不会自动切走">
+    <Card title="OMP 会话" description={rows.length ? `${rows.length} 个会话${active ? ` · ${active} 个活跃` : ''}；记录原地更新` : '全部会话按记录顺序显示'}>
       <Stack gap="sm">
-        {rows.length > 0 && (
+        {listState.state === 'error' && rows.length > 0 && (
+          <Text size="xs" tone="warning">列表刷新失败：{listState.error}（保留上次结果，下个周期重试）</Text>
+        )}
+        {rows.length === 0 && listState.state === 'error' && (
           <Stack gap="xs">
-            <Row justify="between" align="center" gap="sm">
-              <Text size="xs" muted>
-                {query ? `${filteredRows.length} / ${rows.length} 个会话` : `${rows.length} 个会话`}
-                {rows.some((row) => row.active) ? ` · ${rows.filter((row) => row.active).length} 个活跃` : ''}
-              </Text>
-              {fallback && (
-                <Button size="xs" variant="ghost" disabled={picked === fallback.file} onPress={() => void selectSession(fallback.file)}>
-                  {fallback.active ? '回到活跃' : '最近会话'}
-                </Button>
-              )}
-            </Row>
-            <Input label="筛选会话" labelHidden value={read(sessionQuery)} placeholder="按标题或项目筛选" onChange={(value) => set(sessionQuery, value)} />
-            {filteredRows.length > 0 ? (
-              <Box maxHeight={180} scroll="y">
-                <List>
-                  {filteredRows.map((row) => {
-                    const meta = [row.active ? '活跃' : null, projectName(row.cwd)].filter(Boolean).join(' · ')
-                    return (
-                      <ListItem
-                        key={row.file}
-                        title={sessionTitle(row)}
-                        description={meta}
-                        current={picked === row.file}
-                        onPress={() => void selectSession(row.file)}
-                      />
-                    )
-                  })}
-                </List>
-              </Box>
-            ) : <Text size="xs" muted>没有匹配的会话。</Text>}
+            <Text size="sm" tone="warning">会话列表读取失败：{listState.error}</Text>
+            <Text size="xs" muted>面板会每 3 秒自动重试。</Text>
           </Stack>
         )}
-        {!rows.length && !entry && <Text size="xs" muted>正在读取会话…</Text>}
-        {!rows.length && entry && <EmptyState title="暂无 OMP 会话" description="有会话活动后，这里会列出全部会话。" icon="activity" />}
-        {picked && !pickedRow && <Text size="sm" tone="warning">固定的会话已不可见；选择上面的会话，或点「最近会话」。</Text>}
-        {entry?.error && <Text size="sm" tone="warning">{entry.error}</Text>}
-        {picked && !entry && <Text size="xs" muted>正在读取会话…</Text>}
-        {picked && pickedRow && (
-          <Row justify="between" align="center" gap="sm">
-            <Text size="xs" muted>{read(followSession) ? '实时跟随；只更新下方详情' : '已暂停；显示暂停时的快照'}</Text>
-            <Button size="xs" variant="ghost" icon={read(followSession) ? 'pause' : 'play'} onPress={toggleFollow}>
-              {read(followSession) ? '暂停' : '恢复'}
-            </Button>
-          </Row>
+        {rows.length === 0 && listState.state === 'ready' && (
+          <EmptyState title="暂无 OMP 会话" description="有会话活动后，这里会列出全部会话。" icon="activity" />
         )}
-        {shown && (
-          <Box height={192} scroll="y" padding="sm" radius="md" background="muted">
-            <Stack gap="sm">
+        {rows.length === 0 && (listState.state === 'idle' || listState.state === 'loading') && (
+          <Text size="xs" muted>正在读取会话…</Text>
+        )}
+        {rows.map((row, index) => (
+          <Stack key={row.file} gap="sm">
+            {index > 0 && <Separator />}
+            <Stack gap="xs">
               <Row justify="between" align="start" gap="sm">
-                <Stack gap="none">
-                  <Text size="xs" muted>当前模型</Text>
-                  <Text size="sm">{s?.currentModel ?? '未知'}{s?.currentThinking ? ` · ${s.currentThinking}` : ''}</Text>
-                </Stack>
-                <Badge tone={stageTone(current.stage)}>{stageLabel(current.stage)}</Badge>
+                <Text size="sm" weight="medium">{sessionTitle(row)}</Text>
+                <Badge tone={stageTone(row.stage)}>{stageLabel(row.stage)}</Badge>
               </Row>
-              {s?.lastTool
-                ? <KeyValue items={[{ label: '最近工具', value: `${s.lastTool} · ${s.lastToolAt ? new Date(s.lastToolAt).toLocaleTimeString() : ''}` }]} />
-                : <Text size="xs" muted>还没有工具调用记录。</Text>}
-              {s && s.switches.length > 0 ? (
-                <Stack gap="xs">
-                  <Row justify="between" align="center">
-                    <Text size="xs" muted>模型切换历史</Text>
-                    <Text size="xs" muted>最近 {Math.min(s.switches.length, 5)} 条</Text>
-                  </Row>
-                  {s.switches.slice(0, 5).map((sw, i) => (
-                    <Row key={i} justify="between" gap="xs">
-                      <Text size="xs" muted>{sw.at ? new Date(sw.at).toLocaleTimeString() : ''}</Text>
-                      <Text size="xs">{sw.model}{sw.thinking ? ` · ${sw.thinking}` : ''}</Text>
-                    </Row>
-                  ))}
-                </Stack>
-              ) : <Text size="xs" muted>还没有模型切换记录。</Text>}
+              <Stack gap="none">
+                <Text size="xs" muted>模型</Text>
+                <Text size="sm">{row.model ?? '未知'}{row.thinking ? ` · ${row.thinking}` : ''}</Text>
+              </Stack>
+              <Row justify="between" gap="sm" align="center" wrap>
+                <Text size="xs" muted>
+                  {row.lastTool
+                    ? `最近工具 ${row.lastTool}${row.lastToolAt ? ` · ${new Date(row.lastToolAt).toLocaleTimeString()}` : ''}`
+                    : '还没有工具调用记录'}
+                </Text>
+                <Text size="xs" muted>{[row.active ? '活跃' : null, projectName(row.cwd)].filter(Boolean).join(' · ')}</Text>
+              </Row>
             </Stack>
-          </Box>
-        )}
+          </Stack>
+        ))}
       </Stack>
     </Card>
   )
@@ -498,20 +462,22 @@ function sessionCard(f?: FusionState, driver: DriverState | null = null) {
 	const f = entry?.data?.fusion
 	const fetched = read(modelList)
 	const models = read(modelLoaded) ? fetched : entry?.data?.models ?? []
+	const repo = currentRepo()
+	const review = repo ? read(reviewResults)[repo] ?? null : null
+	const reviewRunning = repo ? Boolean(read(reviewingRepos)[repo]) : false
+	const driver = repo ? read(driverStates)[repo] ?? null : null
 	return (
 		<Box padding="md">
 			<Stack gap="md">
 				<Row align="center" gap="none">
-					<Box width={100} shrink={false}><Image src="assets/word.png" alt="Orcai" size="xs" fit="contain" /></Box>
+					<Box width={64} shrink={false}><Image src="assets/logo5.png" alt="Orcai" size="full" fit="contain" /></Box>
+					<Box width={100} shrink={false} margin="none"><Image src="assets/word.png" alt="" size="xs" fit="contain" /></Box>
 				</Row>
 				<Tabs label="Orcai 功能模块" value={read(activeTab)} onChange={(value) => set(activeTab, value)}>
 					<Tab value="orzic" label="Orzic">
 						<Stack gap="md">
 							<Row justify="between" align="center" gap="sm">
-								<Row align="center" gap="xs">
-									<Box width={20} height={20} shrink={false}><Image src="assets/logo5.png" alt="Orzic" size="full" fit="contain" /></Box>
-									<Text size="sm" weight="medium">规划 → 执行 → 验收</Text>
-								</Row>
+								<Text size="sm" weight="medium">规划 → 执行 → 验收</Text>
 								{f && <Badge tone={f.enabled ? 'accent' : 'neutral'}>{f.enabled ? '规划路由开' : '规划路由关'}</Badge>}
 							</Row>
 							<Text size="xs" muted>规划阶段只读，写完 PLAN.md 后切执行模型</Text>
@@ -577,21 +543,21 @@ function sessionCard(f?: FusionState, driver: DriverState | null = null) {
 										{f.ocr && <Separator />}
 										{f.ocr && (
 											<Row justify="between" align="center">
-												<Button size="sm" disabled={read(reviewing) || read(busy)} onPress={() => void runReview()}>
-													{read(reviewing) ? '审查中…' : '运行验收'}
+												<Button size="sm" disabled={!repo || reviewRunning || read(busy)} onPress={() => void runReview()}>
+													{reviewRunning ? '审查中…' : '运行验收'}
 												</Button>
-												{read(reviewResult) && (
-													<Badge tone={({ pass: 'success', rework: 'danger', unreviewed: 'neutral', 'no-repo': 'warning', failed: 'danger' } as Record<string, 'success' | 'danger' | 'neutral' | 'warning'>)[read(reviewResult)!.verdict] ?? 'neutral'}>
-														{({ pass: 'PASS', rework: 'REWORK', unreviewed: '未审查', 'no-repo': '无仓库', failed: '失败' } as Record<string, string>)[read(reviewResult)!.verdict] ?? read(reviewResult)!.verdict}
+												{review && (
+													<Badge tone={({ pass: 'success', rework: 'danger', unreviewed: 'neutral', 'no-repo': 'warning', failed: 'danger' } as Record<string, 'success' | 'danger' | 'neutral' | 'warning'>)[review!.verdict] ?? 'neutral'}>
+														{({ pass: 'PASS', rework: 'REWORK', unreviewed: '未审查', 'no-repo': '无仓库', failed: '失败' } as Record<string, string>)[review!.verdict] ?? review!.verdict}
 													</Badge>
 												)}
 											</Row>
 										)}
-									{read(reviewResult) && (
+									{review && (
 										<Box padding="sm" radius="md" background="muted">
 											<Stack gap="xs">
-												<Text size="xs" muted>{read(reviewResult)!.summary}</Text>
-												{read(reviewResult)!.findings.slice(0, 5).map((fi, i) => (
+												<Text size="xs" muted>{review!.summary}</Text>
+												{review!.findings.slice(0, 5).map((fi, i) => (
 													<Text key={i} size="xs" tone={/blocker|critical|high|error/i.test(fi.severity) ? 'danger' : 'warning'}>
 														[{fi.severity}] {fi.file}{fi.line != null ? `:${fi.line}` : ''} {fi.message.slice(0, 120)}
 													</Text>
@@ -599,39 +565,35 @@ function sessionCard(f?: FusionState, driver: DriverState | null = null) {
 											</Stack>
 										</Box>
 									)}
-									{read(driverState) && (read(driverState)!.driverAlive || read(driverState)!.verdict !== 'none') && (
+									{driver && (driver!.driverAlive || driver!.verdict !== 'none') && (
 										<Box padding="sm" radius="md" background="muted">
 											<Stack gap="xs">
 												<Row justify="between" align="center">
 													<Text size="xs" muted>
-														自动循环 {read(driverState)!.driverAlive ? `· 运行中${read(driverState)!.driverPid != null ? ` pid:${read(driverState)!.driverPid}` : ''}` : '· 已停'}
-														{read(driverState)!.round != null ? ` · 第 ${read(driverState)!.round} 轮` : ''}
-														{read(driverState)!.consumed ? ' · 已回喂' : ''}
+														自动循环 {driver!.driverAlive ? `· 运行中${driver!.driverPid != null ? ` pid:${driver!.driverPid}` : ''}` : '· 已停'}
+														{driver!.round != null ? ` · 第 ${driver!.round} 轮` : ''}
+														{driver!.consumed ? ' · 已回喂' : ''}
 													</Text>
 													<Row gap="xs" align="center">
-														<Badge tone={({ pass: 'success', rework: 'danger', unreviewed: 'neutral', 'no-repo': 'warning', failed: 'danger' } as Record<string, 'success' | 'danger' | 'neutral' | 'warning'>)[read(driverState)!.verdict] ?? 'neutral'}>
-															{({ pass: 'PASS', rework: 'REWORK', unreviewed: '未审查', 'no-repo': '无仓库', failed: '失败' } as Record<string, string>)[read(driverState)!.verdict] ?? read(driverState)!.verdict}
+														<Badge tone={({ pass: 'success', rework: 'danger', unreviewed: 'neutral', 'no-repo': 'warning', failed: 'danger' } as Record<string, 'success' | 'danger' | 'neutral' | 'warning'>)[driver!.verdict] ?? 'neutral'}>
+															{({ pass: 'PASS', rework: 'REWORK', unreviewed: '未审查', 'no-repo': '无仓库', failed: '失败' } as Record<string, string>)[driver!.verdict] ?? driver!.verdict}
 														</Badge>
-														{read(driverState)!.driverAlive && (
+														{driver!.driverAlive && (
 															<Row gap="xs" align="center">
-																<Button size="sm" variant="ghost" onPress={() => void plugin.request('acceptance.stop', { repo: currentRepo() }, { signal, timeoutMs: 8_000 })}>停止</Button>
-																<Button size="sm" variant="ghost" onPress={() => void plugin.request('acceptance.stop', { repo: currentRepo(), force: true }, { signal, timeoutMs: 8_000 })}>强杀</Button>
-														</Row>
+																<Button size="sm" variant="ghost" onPress={() => void stopAcceptance(false)}>停止</Button>
+																<Button size="sm" variant="ghost" onPress={() => void stopAcceptance(true)}>强杀</Button>
+															</Row>
 														)}
 													</Row>
 												</Row>
-												{read(driverState)!.summary ? <Text size="xs" muted>{read(driverState)!.summary}</Text> : null}
+												{driver!.summary ? <Text size="xs" muted>{driver!.summary}</Text> : null}
 											</Stack>
 										</Box>
 									)}
 								</Stack>
 							</Card>
 							)}
-						</Stack>
-					</Tab>
-					<Tab value="sessions" label="会话">
-						<Stack gap="md">
-							{sessionCard(f, read(driverState))}
+							{sessionsCard(read(sessionList), read(sessionListState))}
 						</Stack>
 					</Tab>
 					<Tab value="notes" label="便签">

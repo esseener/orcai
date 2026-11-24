@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { OrcaWorkerApi } from 'orca/worker'
-import type { AcceptanceCfg, FusionState, ModelSwitch, OmpModel, SessionStatus } from './protocol'
+import type { AcceptanceCfg, FusionState, ModelSwitch, OmpModel, SessionStage, SessionStatus } from './protocol'
 import { commandError, ompExecutable } from './cli'
 import { acceptanceResult, acceptanceReview, acceptanceStop } from './acceptance'
 import { createModelCatalog, MODELS_TIMEOUT_MS, parseModelRows } from './orzic-models.mjs'
@@ -210,27 +210,40 @@ const ACTIVE_WINDOW_MS = 120_000
 
 type SessionFile = { file: string; dir: string; mtime: number }
 
-function listSessions(): { file: string; dir: string; ageMs: number; active: boolean; title: string | null; cwd: string | null }[] {
+function listSessions(): { file: string; dir: string; ageMs: number; active: boolean; title: string | null; cwd: string | null; model: string | null; thinking: string | null; stage: SessionStage; lastTool: string | null; lastToolAt: string | null }[] {
+  let dirs: string[]
   try {
-    const rows: (SessionFile & { title: string | null; cwd: string | null })[] = []
-    for (const dir of readdirSync(sessionsRoot)) {
-      const dirPath = join(sessionsRoot, dir)
-      try {
-        for (const f of readdirSync(dirPath)) {
-          if (!f.endsWith('.jsonl')) continue
-          const p = join(dirPath, f)
-          try {
-            const mtime = statSync(p).mtimeMs
-            const meta = sessionMeta(p)
-            rows.push({ file: p, dir, mtime, title: meta.title, cwd: meta.cwd })
-          } catch { /* gone */ }
-        }
-      } catch { /* dir may be a file or gone */ }
-    }
-    rows.sort((a, b) => b.mtime - a.mtime)
-    const now = Date.now()
-    return rows.map((r) => ({ file: r.file, dir: r.dir, ageMs: now - r.mtime, active: now - r.mtime < ACTIVE_WINDOW_MS, title: r.title, cwd: r.cwd }))
-  } catch { return [] }
+    dirs = readdirSync(sessionsRoot)
+  } catch (e) {
+    // A missing sessions root means "no OMP sessions yet"; any other read
+    // failure must reach the panel as an error instead of an empty list, or
+    // every row would disappear and look deleted.
+    if (e && typeof e === 'object' && 'code' in e && e.code === 'ENOENT') return []
+    throw e
+  }
+  const rows: (SessionFile & { title: string | null; cwd: string | null; status: SessionStatus })[] = []
+  for (const dir of dirs) {
+    const dirPath = join(sessionsRoot, dir)
+    try {
+      for (const f of readdirSync(dirPath)) {
+        if (!f.endsWith('.jsonl')) continue
+        const p = join(dirPath, f)
+        try {
+          const mtime = statSync(p).mtimeMs
+          const meta = sessionMeta(p)
+          rows.push({ file: p, dir, mtime, title: meta.title, cwd: meta.cwd, status: sessionStatusFor(p) })
+        } catch { /* gone */ }
+      }
+    } catch { /* dir may be a file or gone */ }
+  }
+  rows.sort((a, b) => b.mtime - a.mtime)
+  const now = Date.now()
+  return rows.map((r) => ({
+    file: r.file, dir: r.dir, ageMs: now - r.mtime, active: now - r.mtime < ACTIVE_WINDOW_MS,
+    title: r.title, cwd: r.cwd,
+    model: r.status.currentModel, thinking: r.status.currentThinking, stage: r.status.stage,
+    lastTool: r.status.lastTool, lastToolAt: r.status.lastToolAt,
+  }))
 }
 
 const metaCache = new Map<string, { title: string | null; cwd: string | null }>()
@@ -266,28 +279,34 @@ function pickSession(file?: string): { file: string; mtime: number; size: number
 }
 
 const statusCache = new Map<string, { mtime: number; size: number; value: SessionStatus }>()
-const writeTools = new Set(['edit', 'write', 'bash', 'ast_edit', 'eval', 'notebook'])
-function sessionStatus(input?: { file?: string }): SessionStatus {
-  const found = pickSession(input?.file)
-  const empty: SessionStatus = { file: null, ageMs: null, currentModel: null, currentThinking: null, switches: [], lastTool: null, lastToolAt: null, stage: 'unknown', stageModel: null }
-  if (!found) return empty
-  // Reparse only when the file changed — long sessions were fully re-read and
-  // re-parsed on every 3s tick, O(file size) per poll.
-  const cached = statusCache.get(found.file)
-  if (cached && cached.mtime === found.mtime && cached.size === found.size) {
-    return { ...cached.value, ageMs: Date.now() - found.mtime }
+const writeTools: Record<string, true> = { edit: true, write: true, bash: true, ast_edit: true, eval: true, notebook: true }
+function emptySessionStatus(): SessionStatus {
+  return { file: null, ageMs: null, currentModel: null, currentThinking: null, switches: [], lastTool: null, lastToolAt: null, stage: 'unknown', stageModel: null }
+}
+
+// Read one session directly. `listSessions` calls this per row so the panel can
+// render every session without N+1 `session.status` round trips; the cache key
+// is the file itself, so an unchanged session costs only a stat.
+function sessionStatusFor(file: string): SessionStatus {
+  const empty = emptySessionStatus()
+  let mtime: number
+  let size: number
+  try { const st = statSync(file); mtime = st.mtimeMs; size = st.size } catch { return empty }
+  const cached = statusCache.get(file)
+  if (cached && cached.mtime === mtime && cached.size === size) {
+    return { ...cached.value, ageMs: Date.now() - mtime }
   }
-  empty.file = basename(found.file)
-  empty.ageMs = Date.now() - found.mtime
+  empty.file = basename(file)
+  empty.ageMs = Date.now() - mtime
   try {
     // Read at most the last 512 KiB — model/tool events we surface are recent.
     let text: string
-    if (found.size > 512 * 1024) {
-      const fd = openSync(found.file, 'r')
-      try { const buf = Buffer.alloc(512 * 1024); readSync(fd, buf, 0, 512 * 1024, found.size - 512 * 1024); text = buf.toString('utf8') } finally { closeSync(fd) }
+    if (size > 512 * 1024) {
+      const fd = openSync(file, 'r')
+      try { const buf = Buffer.alloc(512 * 1024); readSync(fd, buf, 0, 512 * 1024, size - 512 * 1024); text = buf.toString('utf8') } finally { closeSync(fd) }
       text = text.slice(text.indexOf('\n') + 1) // drop the partial first line
     } else {
-      text = readFileSync(found.file, 'utf8')
+      text = readFileSync(file, 'utf8')
     }
     const lines = text.split('\n')
     let pendingModel: ModelSwitch | null = null
@@ -311,7 +330,7 @@ function sessionStatus(input?: { file?: string }): SessionStatus {
         if (tool) {
           empty.lastTool = tool
           empty.lastToolAt = d.timestamp as string
-          if (writeTools.has(tool)) empty.stage = 'executing'
+          if (writeTools[tool] === true) empty.stage = 'executing'
         }
       }
     }
@@ -322,7 +341,13 @@ function sessionStatus(input?: { file?: string }): SessionStatus {
     empty.stageModel = empty.currentModel
     if (empty.stage !== 'executing') empty.stage = empty.currentModel ? 'planning' : 'unknown'
   } catch { /* unreadable file */ }
-  statusCache.set(found.file, { mtime: found.mtime, size: found.size, value: empty })
+  statusCache.set(file, { mtime, size, value: empty })
   // Cache is per-worker; sessions are bounded, so growth is trivial.
   return empty
+}
+
+function sessionStatus(input?: { file?: string }): SessionStatus {
+  if (input?.file) return sessionStatusFor(input.file)
+  const found = pickSession()
+  return found ? sessionStatusFor(found.file) : emptySessionStatus()
 }
