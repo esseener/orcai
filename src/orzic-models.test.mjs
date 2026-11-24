@@ -158,12 +158,14 @@ test('Chinese model names still match', () => {
   assert.deepEqual(filterModelChoices(models, 'swe2').map((m) => m.id), ['devin/swe-2'])
 })
 
-test('a punctuation-only query keeps plain substring matching', () => {
+test('a query with no letters or digits behaves like an empty query', () => {
   const models = [
     { id: 'a/b-1', name: 'B One', thinking: [] },
     { id: 'a/c2', name: 'C Two', thinking: [] },
   ]
-  assert.deepEqual(filterModelChoices(models, '-').map((m) => m.id), ['a/b-1'])
+  assert.deepEqual(filterModelChoices(models, '-').map((m) => m.id), ['a/b-1', 'a/c2'])
+  assert.deepEqual(filterModelChoices(models, ' -- ').map((m) => m.id), ['a/b-1', 'a/c2'])
+  assert.deepEqual(filterModelChoices(models, '-', { limit: 1 }).map((m) => m.id), ['a/b-1'])
 })
 
 test('picker hides fusion combos that outnumber and overshadow the real model', () => {

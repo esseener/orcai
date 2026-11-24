@@ -44,20 +44,14 @@ export function isFusionModel(model) {
 
 // "swe2" must find `devin/swe-2`: compare with separators stripped, and rank
 // id hits above name hits so the canonical model is not cut by the row cap.
-// Unicode letters/digits are kept, so a Chinese model name still matches; a
-// query with no letters/digits at all falls back to plain substring matching.
+// Unicode letters/digits are kept, so a Chinese model name still matches. A
+// query with no letters/digits at all behaves like an empty query, exactly as
+// the separator-insensitive search did before this picker work.
 const squash = (value) => String(value ?? '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
 
-function rank(model, needle, raw) {
+function rank(model, needle) {
   const id = squash(model.id)
   const name = squash(model.name)
-  if (!needle) {
-    const plainId = String(model.id ?? '').toLowerCase()
-    const plainName = String(model.name ?? '').toLowerCase()
-    if (plainId.includes(raw)) return 5
-    if (plainName.includes(raw)) return 6
-    return -1
-  }
   // The selector tail is the model itself (`devin/swe-2`), so it outranks a
   // provider-wide id or name hit.
   const tail = squash(String(model.id ?? '').slice(String(model.id ?? '').lastIndexOf('/') + 1))
@@ -72,12 +66,11 @@ function rank(model, needle, raw) {
 }
 
 export function filterModelChoices(models, query, { limit = 200 } = {}) {
-  const raw = String(query ?? '').trim().toLowerCase()
-  const needle = squash(raw)
+  const needle = squash(query)
   const scored = []
   for (const model of models) {
     if (isFusionModel(model)) continue
-    const score = raw ? rank(model, needle, raw) : 0
+    const score = needle ? rank(model, needle) : 0
     if (score < 0) continue
     scored.push({ model, score })
   }
