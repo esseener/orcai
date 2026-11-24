@@ -252,6 +252,46 @@ test('an undefined setModel result aborts the turn', async () => {
   assert.deepEqual(env.setModels, [])
 })
 
+test('a missing session pin aborts the main turn instead of running the current model', async () => {
+  const env = setup()
+  const ctx = env.ctxFor('')
+  await assert.rejects(env.fire('before_agent_start', { prompt: '审查并做计划' }, ctx), /会话 pin/)
+  assert.equal(env.aborts.length, 1)
+  assert.deepEqual(env.setModels, [])
+})
+
+test('a throwing sessionFile lookup aborts the main turn', async () => {
+  const env = setup()
+  const ctx = env.ctxFor('x')
+  ctx.sessionManager.getSessionFile = () => { throw new Error('session store unavailable') }
+  await assert.rejects(env.fire('before_agent_start', { prompt: '审查并做计划' }, ctx), /会话 pin/)
+  assert.equal(env.aborts.length, 1)
+  assert.deepEqual(env.setModels, [])
+})
+
+test('side-effect tools are blocked when the session pin is unavailable', async () => {
+  const env = setup()
+  const ctx = env.ctxFor('')
+  for (const [name, input] of [['bash', { command: 'ls' }], ['write', { path: 'a', content: 'x' }], ['task', { tasks: [] }]]) {
+    const blocked = await env.fire('tool_call', { toolCallId: `no-pin-${name}`, toolName: name, input }, ctx)
+    assert.equal(blocked?.block, true, `${name} must be blocked without a session pin`)
+  }
+  assert.equal(await env.fire('tool_call', { toolCallId: 'no-pin-read', toolName: 'read', input: { path: 'a' } }, ctx), undefined)
+})
+
+test('a revive hook without a session pin does not abort', async () => {
+  const env = setup()
+  const ctx = env.ctxFor('')
+  await env.fire('before_agent_start', { prompt: '', reason: 'revive' }, ctx)
+  assert.equal(env.aborts.length, 0)
+})
+
+test('autoRoute off leaves side-effect tools alone without a pin', async () => {
+  const env = setup({ autoRoute: false })
+  const ctx = env.ctxFor('')
+  assert.equal(await env.fire('tool_call', { toolCallId: 'off-bash', toolName: 'bash', input: { command: 'ls' } }, ctx), undefined)
+})
+
 test('plan: routes to planner and blocks non-plan writes and bash', async () => {
   const env = setup()
   const ctx = env.ctxFor(join(env.agent, 'sessions', 'b.jsonl'))

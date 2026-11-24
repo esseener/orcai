@@ -45,7 +45,7 @@ OMP 的规划/执行侧栏调度器 + 自动验收循环。新请求先交给规
 
 ### 失败安全(fail closed)
 
-- **Session pinning**:`ctx.sessionManager.getSessionFile()` 权威路径经 `ORZIC_SESSION_FILE` 环境变量传给 driver;拿不到 pin → 只评审、**不注入**。永不对「最新同 cwd session」猜测注入。
+- **Session pinning**:`ctx.sessionManager.getSessionFile()` 权威路径经 `ORZIC_SESSION_FILE` 环境变量传给 driver;解析会话头并**精确比较规范化 cwd**(`app` 不会匹配 `app-other`);拿不到 pin → 只评审、**不注入**。永不对「最新同 cwd session」猜测注入。
 - **单实例锁(每仓库,目录锁)**:`~/.omp/agent/orzic-driver-<key>.lock` 是**目录**;每个竞争者写独有 `owner-<token>.json`,胜者为「未过期条目里最小 token」——原子、无共享可变文件,`stat→unlink`/`check→mutate` 竞态不存在;心跳只刷自己的 entry,僵尸复活丢锁即退出;不同 repo 各自持锁可并发。`key=basename+SHA256(规范化真实路径) 前16hex`。
 - **确定性门禁（省钱,先于评审)**:`checkCmd`(如 `npm run typecheck && npm test`)在 judge 之前跑——挂了直接 `rework` 注入,judge 一次不调;过了才花钱评审。对标 Devin fusion(sidekick 跑 build/test)与 AWS gated review(硬门禁先于 AI 评审)。评审模型保持高配,省 token 靠「免费门禁挡返工 + revision 去重」,不换便宜模型。
 - **可选 aislop 质量门禁**：在现有 `typecheck`/测试之后，可用固定版本执行全仓扫描：`npx aislop@0.16.1 ci`。它补充检查 AI 生成代码常见问题，不替代项目已有测试。当前 driver 评审捕获的 `HEAD` 提交差异，不等同于工作树相对 `HEAD` 的变更，因此不要在这里使用裸 `aislop ci --changes` 作为默认命令。
@@ -53,6 +53,7 @@ OMP 的规划/执行侧栏调度器 + 自动验收循环。新请求先交给规
 - **双注入防重**:verdict `rework` 注入前写 `consumed:true`;会话内不再发送,回喂只走 driver 的 `omp -r`。
 - **停止**:`acceptance.stop({repo})` 读锁内 run token 写 `orzic-stop-<key>`——driver 只认自己铸的 token(不信锁里的 pid,可被杀后复用),协作式本轮结束退出;`{force:true}` 附 `kill:true`,driver 杀自己 spawn 的 `omp -r` 子树(`exitCode/signalCode` 校验防止杀到已释放 pid)再放锁退出。**没有外部进程被 taskkill。**
 - **verdict 保真**:无 diff 的空轮次不覆盖上一个 verdict;judge/注入失败的 verdict 永远是 `failed`,绝不 `pass`。
+- **实时开关**:driver 每轮开始、评审结束后、注入前重读 `orzic-acceptance.json`;`autoReview` 关闭立即退出,`autoRework` 关闭只记录 verdict 不注入,评审后/注入前的 stop 请求都不会再启动 `omp -r`。
 
 ### 面板状态
 
@@ -121,7 +122,7 @@ node --test src/*.test.mjs
 npm run smoke:omp
 ```
 
-`smoke:omp` 会用隔离临时目录真实启动 OMP，验证扩展能加载、`before_agent_start` 能收到 prompt、规划模型实际应答（消耗一次短模型调用）。可用 `ORZIC_SMOKE_PLANNER` / `ORZIC_SMOKE_EXECUTOR` / `ORZIC_OMP_BIN` 覆盖。任一路由契约改形，smoke 会失败。
+`smoke:omp` 会用隔离临时目录真实启动 OMP，验证扩展能加载、`before_agent_start` 能收到 prompt、规划模型实际写入并快照 `PLAN.md`、随后切换执行模型并得到成功应答（消耗一次短规划+执行调用）。可用 `ORZIC_SMOKE_PLANNER` / `ORZIC_SMOKE_EXECUTOR` / `ORZIC_OMP_BIN` 覆盖。任一路由/工具/会话契约改形，smoke 会失败。
 
 失败时插件保持 **fail closed**：路由不降级到其他模型，验收只会写 `failed`/`unreviewed`，不会静默 `pass`。需要冻结工作流时固定 OMP 版本，升级前在分支上跑完整 smoke。
 
@@ -132,6 +133,8 @@ npm run smoke:omp
 - Driver 只读捕获时的 `HEAD~1..HEAD`;仅写文件但未提交时即使调用受识别工具触发 hook,也可能评审旧 HEAD 的提交差异;空提交没有可评审 diff。首次验证必须让 OMP 在本轮结束前创建新的非空 commit。
 - `prompt_submit` 不再发任何消息：回喂只走 driver 的 `omp -r`;会话内注入会和 driver 撞窗口、还可能把旧 verdict 喂给同 cwd 的兄弟会话。
 - **阶段在进程内，规划标记在磁盘**:规划/执行状态保存在扩展内存;OMP 重启或手动 `omp -r` 后第一条消息重新规划。唯一例外是规划阶段本身:标记落盘后,即使恢复进程先收到工具调用、`session_start` 还没拿到会话文件,也会继续拦截写入,不会退化成“Astra 规划 + 已允许写”。交接成功后标记删除,执行阶段重启仍按新任务重新规划。driver 自己的 `omp -r` 带 `ORZIC_DRIVER=1`,跳过路由并显式 `--model @default`,不受此影响。
+- **完成事件门槛**:计划/代码写入必须收到显式 `isError === false`;`bash`/`eval` 需有布尔 `isError`,非零退出仍可能已提交。所有待处理调用绑定当前轮次,OMP 重启/新一轮开始后迟到的完成事件一律丢弃;验收只在明确的执行阶段触发。
 - **子代理不写主计划**:路由、只读门禁和验收 `agent_end` 只处理 `ctx.agent.kind !== 'sub'` 的会话。子代理即使由执行阶段拉起,也不会把自己的 `PLAN.md` 写进 `orzic-plan-<repoKey>.json`;验收评审引用的始终是主会话批准的计划。
+- **无 session pin 时 fail closed**:autoRoute 开启的主会话如果 `ctx.sessionManager.getSessionFile()` 返回空或抛错,`before_agent_start` 直接 `abort()` 停轮,`tool_call` 拦截 `bash`/`eval`/`task` 与写工具,读工具仍可用;`reason: "revive"` 的空 prompt 不 abort。这样不会再出现“规划模型还在、会话 key 丢失、写入却放行”的路径。
 - **委派验收的边界**:父会话在 `task` 委派完成后触发一次验收,由父 session pin 决定注入目标;评审的是父仓库当时的 `HEAD` 提交。子代理只改工作树、没有提交时仍会落回“无 diff/unreviewed”(既有 `HEAD~1..HEAD` 边界),不会把未提交改动当成已验收。
 - verdict/lock/stop 文件按仓库分名(`orzic-review-<key>` 等):多 repo 可并发跑 driver。同一 cwd 下两个会话仍只认 `ORZIC_SESSION_FILE` pin 的那一个;`acceptance.result/stop` 依赖面板给出正确 `repo`。
