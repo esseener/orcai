@@ -90,6 +90,18 @@ test('picking a filtered model writes it as the plan model', async () => {
   assert.deepEqual(writes, [{ from: 'devin/swe-2', fromEffort: null }])
 })
 
+test('Orcai exposes Orzic and 便签 as separate modules', async () => {
+  mounted = await mount(panel, { host: mockHost({ requests }) })
+  assert.deepEqual(mounted.errors, [])
+  // The panel is the Orcai container; each tab is one module.
+  assert.deepEqual(mounted.findAll({ type: 'Tab' }).map((tab) => tab.text), ['Orzic', '便签'])
+  // Routing status belongs to the Orzic module, not the global header.
+  assert.equal(mounted.find({ text: '规划路由关' })?.text, '规划路由关')
+  await mounted.select({ type: 'Tabs' }, 'notes')
+  assert.equal(mounted.find({ type: 'EmptyState', label: '还没有便签' })?.label, '还没有便签')
+  assert.equal(mounted.find({ text: '规划路由关' }), null)
+})
+
 test('the selected thinking level is highlighted, not a gray ghost', async () => {
   mounted = await mount(panel, {
     host: mockHost({

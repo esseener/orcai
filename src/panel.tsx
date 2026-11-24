@@ -89,7 +89,7 @@ async function runReview() {
 const busy = atom(false)
 const editing = atom<string | null>(null)
 const draft = atom<Record<string, { model?: string; effort?: string | null; search?: string }>>({})
-const PLUGIN_VERSION = '0.1.16'
+const PLUGIN_VERSION = '0.1.17'
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function stageLabel(stage: SessionStage): string {
@@ -246,11 +246,11 @@ function modelPicker(fid: Fid, title: string, caption: string, currentModel: str
 
   return (
     <Stack gap="xs">
-      <Row justify="between" gap="sm" align="center">
-        <Stack gap="none">
-          <Text size="sm" weight="medium">{title}</Text>
-          <Text size="xs" muted>{caption}</Text>
-        </Stack>
+      <Stack gap="none">
+        <Text size="sm" weight="medium">{title}</Text>
+        <Text size="xs" muted>{caption}</Text>
+      </Stack>
+      <Row justify="start">
         <Button size="sm" variant="ghost" disabled={read(busy)} onPress={() => set(editing, isEditing ? null : fid)}>
           {selected ? modelLabel(selectedModel, selected) : '选择模型'}
         </Button>
@@ -365,16 +365,20 @@ function sessionCard(f?: FusionState, driver: DriverState | null = null) {
 	return (
 		<Box padding="md">
 			<Stack gap="md">
-				<Row justify="between" align="center" gap="sm">
-					<Row align="center" gap="none">
-						<Box width={64} shrink={false}><Image src="assets/logo5.png" alt="Orcai" size="full" fit="contain" /></Box>
-						<Box width={100} shrink={false} margin="none"><Image src="assets/word.png" alt="" size="xs" fit="contain" /></Box>
-					</Row>
-					{f && read(activeTab) === 'orzic' && <Badge tone={f.enabled ? 'accent' : 'neutral'}>{f.enabled ? '规划路由开' : '规划路由关'}</Badge>}
+				<Row align="center" gap="none">
+					<Box width={64} shrink={false}><Image src="assets/logo5.png" alt="Orcai" size="full" fit="contain" /></Box>
+					<Box width={100} shrink={false} margin="none"><Image src="assets/word.png" alt="" size="xs" fit="contain" /></Box>
 				</Row>
-				<Tabs label="Orcai 工具" value={read(activeTab)} onChange={(value) => set(activeTab, value)}>
-					<Tab value="orzic" label="Orcai">
+				<Tabs label="Orcai 功能模块" value={read(activeTab)} onChange={(value) => set(activeTab, value)}>
+					<Tab value="orzic" label="Orzic">
 						<Stack gap="md">
+							<Row justify="between" align="center" gap="sm">
+								<Row align="center" gap="xs">
+									<Text size="sm" weight="medium">Fusion</Text>
+									<Text size="xs" muted>规划 → 执行 → 验收</Text>
+								</Row>
+								{f && <Badge tone={f.enabled ? 'accent' : 'neutral'}>{f.enabled ? '规划路由开' : '规划路由关'}</Badge>}
+							</Row>
 							<Text size="xs" muted>开始任务后由规划模型只读规划；批准计划后恢复执行模型，验收仍在会话外。</Text>
 							{entry?.error && <Text size="sm" tone="warning">{entry.error}</Text>}
 							{read(modelError) && (

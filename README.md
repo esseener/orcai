@@ -2,36 +2,49 @@
 
 # Orcai
 
-OMP 的规划/执行侧栏调度器 + 自动验收循环。新请求先交给规划模型只读规划；`PLAN.md` 写入工具成功返回且计划非空后，同一会话切执行模型，之后表达执行/继续意图就留在执行阶段。验收在会话外由独立 judge 对着 diff 和**本会话**已批准的计划判定。
+**Orcai 是总插件**，侧栏里容纳多个功能模块；**Orzic 是其中的 Fusion 模块**：OMP 的规划/执行路由 + 自动验收循环。新请求先交给规划模型只读规划；`PLAN.md` 写入工具成功返回且计划非空后，同一会话切执行模型，之后表达执行/继续意图就留在执行阶段。验收在会话外由独立 judge 对着 diff 和**本会话**已批准的计划判定。便签是第二个并列模块。
+
+## 插件与模块
+
+| 层级 | 名称 | 位置 |
+|---|---|---|
+| 总插件 | **Orcai** | manifest `name`、面板标题与品牌、`package.json` |
+| 模块 | **Orzic** (Fusion) | 面板 `Orzic` 页签：规划/执行路由、会话状态、验收 |
+| 模块 | **便签** | 面板 `便签` 页签：运行时记录与复制 |
+
+新增功能按**模块**扩展：在 `src/panel.tsx` 的 `Tabs` 里加一个 `<Tab>`，请求用一个自己的命名空间（如 `fusion.*`、`acceptance.*`），不要把新功能塞进 Orzic 页签。面板顶部只展示 Orcai 品牌；模块自己的状态徽标留在模块页签内。
+
+新模块不需要新建插件，也不改插件 id。插件 id、面板 id、`local.orzic` 安装标识、`orzic-*` 状态文件和 `orzic.notes` 持久化键继续保留 `orzic` 前缀，避免既有安装与审批失效。
 
 ## 版本与发布
 
-当前版本 **0.1.11**，见 [CHANGELOG.md](CHANGELOG.md)。插件显示名为 **Orcai**；插件 id、面板 id 和状态文件仍保留 `orzic` 前缀，避免既有安装与审批失效。
+当前版本 **0.1.17**，见 [CHANGELOG.md](CHANGELOG.md)。
 
-版本号同时维护在三处：
+版本号同时维护在四处：
 
 - `orca-plugin.json` 的 `version`
 - `package.json` 的 `version`
+- `package-lock.json` 的根 `version` 与 `packages[""].version`
 - `src/panel.tsx` 的 `PLUGIN_VERSION`
 
 每次发布：
 
 ```powershell
-# 1. 更新上面三处版本号，并把 CHANGELOG 的 Unreleased 移到对应版本
+# 1. 更新上面四处版本号，并把 CHANGELOG 的 Unreleased 移到对应版本
 npm run check:version
 npm run typecheck
 node --test src/*.test.mjs
 npm run smoke:omp
 # 2. 提交后打标签
-git tag -a v0.1.11 -m "v0.1.11"
+git tag -a v0.1.17 -m "v0.1.17"
 ```
 
-## 面板标签
+## 面板模块
 
-- **Orcai**：开始任务、规划/执行模型、验收设置和 OMP 会话状态。
+- **Orzic (Fusion)**：开始任务、规划/执行模型、验收设置和 OMP 会话状态。模块头显示 Fusion 流程和「规划路由开/关」。
 - **便签**：记录运行中的临时想法，支持新建、编辑、删除和持久保存。点击「复制」后手动粘贴到 OMP 输入框并自行提交；便签不会自动注入或发送。
 
-## 规划/执行路由
+## Orzic：规划/执行路由
 
 - **规划模型** = `modelRoles.plan`；**执行模型** = `modelRoles.default`
 - **新任务先规划**：每条新请求（包括“审查一下 / 做个计划”）都切规划模型；不再按关键词或字数猜成执行
@@ -41,13 +54,13 @@ git tag -a v0.1.11 -m "v0.1.11"
 - **规划指令注入**：规划轮会注入一条隐藏说明，明确只读边界和 `PLAN.md` 交接出口；不再只靠被拦截后的报错让模型猜
 - **阶段落盘**：规划阶段写入 `~/.omp/agent/orzic-phases/<session-hash>.json`（12 小时内有效），进程恢复后首个工具调用也会重新判定；交接成功后删除标记
 - **模型不可用**：本轮中止并提示，绝不静默降级到另一个模型
-- **子代理不参与路由**：Orcai 只调度主会话；`task` 子代理的模型由 OMP 自己决定，不会重走规划、不会阻塞写入，也不会覆盖主会话的 `orzic-plan-<repoKey>.json` 计划快照
-- **子代理同规则** = 面板开关把内置 `task` 子代理交给 OMP 的 `task.prewalk`，与上面这条 Orcai 路由边界是两件事
-- **与 OMP 原生 plan mode 的边界**：Orcai 维护自己的规划阶段，以 `PLAN.md` 写入成功作为交接，不读取也不接管 OMP 原生 plan mode 的审批状态。同一会话请只用一种规划入口；原生 plan mode 的模型与只读由 OMP 自己管理，Orcai 的标记与交接不参与。
+- **子代理不参与路由**：Orzic 只调度主会话；`task` 子代理的模型由 OMP 自己决定，不会重走规划、不会阻塞写入，也不会覆盖主会话的 `orzic-plan-<repoKey>.json` 计划快照
+- **子代理同规则** = 面板开关把内置 `task` 子代理交给 OMP 的 `task.prewalk`，与上面这条 Orzic 路由边界是两件事
+- **与 OMP 原生 plan mode 的边界**：Orzic 维护自己的规划阶段，以 `PLAN.md` 写入成功作为交接，不读取也不接管 OMP 原生 plan mode 的审批状态。同一会话请只用一种规划入口；原生 plan mode 的模型与只读由 OMP 自己管理，Orzic 的标记与交接不参与。
 - **task 委派也纳入验收**：执行阶段完成的 `task` 调用会为父会话记一次待验收；若该轮 `agent_end` 仍在等后台子代理（`awaitingAsyncWork`），验收推迟到子代理结果回来后的收尾，由父会话的 session pin 启动一次 driver。
 - 会话卡实时显示当前模型、最近工具和模型切换时间线；多会话可切换查看
 
-## 验收(Acceptance)
+## Orzic：验收(Acceptance)
 
 写完代码的轮次自动跑第三方评审，REWORK 自动回喂返工，PASS 收口。**手动路径**(面板「运行验收」)在 worker 内同步跑；**自动路径**由 `orzic-driver.mjs` 在会话外跑。评审输入包含 git diff、规则，以及 `orzic-plan-<repoKey>.json` 里**已批准的计划**；实现偏离计划会被报成 finding。
 
@@ -116,7 +129,7 @@ npm run smoke:omp
 | `src/worker.ts` | `fusion.status`/`fusion.set`/`models.list`/`session.status`/`session.list` + 接线 `acceptance.*` handler;`fusion.status` 用一次 `omp config list` 并立即返回磁盘模型快照,`models.list` 单独刷新目录;`installLoopExtension` 把 loop+driver 同步进 `~/.omp/agent/extensions` |
 | `src/acceptance.ts` | `acceptance.review`(ompJudge/ocrCli 手动判定)+ `acceptance.result`(读 review.json+lock)+ `acceptance.stop`(写带 run-token 的 stop flag,force 附 kill) |
 | `src/cli.ts` | `ompExecutable`(OMP CLI 路径解析)+ `commandError` |
-| `src/panel.tsx` | 侧栏:fusion 配置 / 会话卡 / 验收开关+手动验收 / driver 状态条+停止+强杀;配置与模型目录分两路加载;模型选择器不列 Devin `fusion-*` 合成模型,搜索忽略分隔符(`swe2` → `devin/swe-2`) |
+| `src/panel.tsx` | Orcai 侧栏容器与模块页签:Orzic(Fusion 配置 / 会话卡 / 验收开关+手动验收 / driver 状态条+停止+强杀)和便签;新增功能加一个模块页签;配置与模型目录分两路加载;模型选择器不列 Devin `fusion-*` 合成模型,搜索忽略分隔符(`swe2` → `devin/swe-2`) |
 | `src/protocol.ts` | `PluginRequests` 声明 + `AcceptanceCfg`/`ReviewVerdict`/`Finding`/`ReviewOut`/`FusionState`/`SessionStatus` |
 | `src/orzic-models.mjs` | `omp models ls` 的缓存 + single-flight:并发/重试共享一次 CLI,失败拒绝而不是返回空目录 |
 | `src/orzic-loop.ts` | OMP 扩展:新请求切规划模型、只有明确继续才用执行模型;`tool_call` 阻断规划期 `bash`/`eval` 与 PLAN.md 外写入;`tool_execution_end` 确认写入成功且计划非空后才保存快照并切执行;`agent_end` 只启动会话外验收驱动,不从历史文件补办批准 |

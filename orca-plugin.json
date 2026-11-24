@@ -2,8 +2,8 @@
   "manifestVersion": 2,
   "id": "orzic",
   "name": "Orcai",
-  "version": "0.1.16",
-  "description": "Orcai - OMP plan-mode routing: plan with one model, approve, then execute with another in the same session.",
+  "version": "0.1.17",
+  "description": "Orcai - plugin host for multiple modules. Orzic (Fusion) routes plan/execute models and runs acceptance out of session.",
   "engines": {
     "orca": ">=1.4.268"
   },
