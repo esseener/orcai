@@ -1,7 +1,8 @@
 // Compatibility smoke for the installed OMP: proves the extension still loads,
-// routes a plan request to the planner, writes and snapshots PLAN.md through a
-// real tool call, hands off to the executor, and gets a successful reply.
-// Run after every OMP upgrade. Costs one short planner + executor turn.
+// routes a plan request to the planner, delivers the planning guidance, writes
+// and snapshots PLAN.md through a real tool call, hands off to the executor,
+// and gets a successful reply. Run after every OMP upgrade. Costs one short
+// planner + executor turn.
 //
 //   node tools/smoke-omp.mjs [--keep]
 //   ORZIC_OMP_BIN=... ORZIC_SMOKE_PLANNER=provider/model ORZIC_SMOKE_EXECUTOR=provider/model
@@ -72,6 +73,8 @@ if (!handoff) fail(`PLAN.md handoff did not reach the executor\n${log}`)
 const files = readdirSync(sessions).filter((f) => f.endsWith('.jsonl'))
 if (!files.length) fail('no session file was written; sessionManager.getSessionFile may have changed')
 const sessionFile = join(sessions, files[0])
+const sessionText = readFileSync(sessionFile, 'utf8')
+if (!sessionText.includes('orzic-planning')) fail('planning guidance was not delivered to the planner')
 
 const plans = readdirSync(agent).filter((f) => f.startsWith('orzic-plan-') && f.endsWith('.json'))
 if (plans.length !== 1) fail(`expected one plan snapshot, found ${plans.length}\n${log}`)

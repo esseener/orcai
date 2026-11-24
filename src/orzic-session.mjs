@@ -34,12 +34,18 @@ export function resolveSession({ pinnedFile, sessionsRoot, cwd }) {
 
 // A substring match is not enough: `C:\repo\app` is a prefix of
 // `C:\repo\app-other`. Parse the session header and compare normalized paths.
-function normalizePath(value) {
+// Backslash is a legal POSIX filename character, so only Windows-style paths
+// get separator normalization; folding it on POSIX would equate /a\b with /a/b
+// and let a session from another directory pass the exact-pin check.
+export function normalizePath(value) {
   let p = String(value ?? '').trim()
   if (!p) return ''
   try { p = realpathSync(p) } catch { /* path may not exist; keep the header value */ }
-  p = p.replace(/\\/g, '/')
-  if (/^[a-zA-Z]:\//.test(p) || p.startsWith('//')) p = p.toLowerCase()
+  const windows = process.platform === 'win32' || /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('\\\\')
+  if (windows) {
+    p = p.replace(/\\/g, '/')
+    if (/^[a-zA-Z]:\//.test(p) || p.startsWith('//')) p = p.toLowerCase()
+  }
   return p.replace(/\/+$/, '')
 }
 

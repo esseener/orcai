@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { acquireLock, heartbeatLock, lockHeld, readLock, releaseLock } from './orzic-lock.mjs'
 import { repoKey } from './orzic-repokey.mjs'
-import { resolveSession } from './orzic-session.mjs'
+import { normalizePath, resolveSession } from './orzic-session.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const DRIVER = join(here, 'orzic-driver.mjs')
@@ -84,6 +84,15 @@ test('lock: a zombie holder cannot resurrect over a live successor', () => {
 })
 
 // ---------- session pinning (fail closed) ----------
+test('session: POSIX backslash is a filename character, not a separator', { skip: process.platform === 'win32' }, () => {
+  const base = mkdtempSync(join(tmpdir(), 'orzic-path-'))
+  const literal = join(base, 'a\\b')
+  const nested = join(base, 'a', 'b')
+  mkdirSync(literal)
+  mkdirSync(nested, { recursive: true })
+  assert.notEqual(normalizePath(literal), normalizePath(nested), '/a\\b and /a/b are different directories on POSIX')
+})
+
 test('resolveSession: authoritative pin wins over a newer same-cwd sibling', () => {
   const agent = mkAgent(); const root = join(agent, 'sessions')
   const cwd = 'C:\\repo\\same'
@@ -443,6 +452,31 @@ test('driver: @default judge is not deduped across runs (model may change)', () 
   const calls = readFileSync(join(agent, 'orzic-stub-calls.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).args)
   assert.equal(calls.filter((a) => a[0] === '--model').length, 2, 'alias model must not reuse an old verdict')
   assert.equal(reviewOf(agent, repo).dedupKey, undefined)
+})
+
+test('driver: @default rework does not repeat on an unchanged revision within one run', () => {
+  const agent = mkAgent(); const repo = mkRepo()
+  const exact = mkSession(join(agent, 'sessions'), repo, '2026-01-01_a.jsonl')
+  writeFileSync(join(agent, 'orzic-acceptance.json'), JSON.stringify({ autoReview: true, autoRework: true, maxRework: 3 }))
+  const r = runDriver({ ORZIC_AGENT_DIR: agent, ORZIC_CWD: repo, ORZIC_SESSION_FILE: exact, ORZIC_OMP_BIN: NODE, ORZIC_OMP_PREARGS: JSON.stringify([STUB]), ORZIC_STUB_MODE: 'rework' })
+  assert.equal(r.status, 0)
+  const calls = readFileSync(join(agent, 'orzic-stub-calls.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).args)
+  assert.equal(calls.filter((a) => a[0] === '--model').length, 1, 'judge runs once for the unchanged revision')
+  assert.equal(calls.filter((a) => a[0] === '-r').length, 1, 'rework is injected once, not to maxRework')
+  assert.match(readFileSync(join(agent, `orzic-driver-${keyOf(repo)}.log`), 'utf8'), /unchanged after rework/)
+})
+
+test('driver: autoReview disabled during checkCmd skips the paid judge', () => {
+  const agent = mkAgent(); const repo = mkRepo()
+  const exact = mkSession(join(agent, 'sessions'), repo, '2026-01-01_a.jsonl')
+  const cfg = join(agent, 'orzic-acceptance.json')
+  writeFileSync(cfg, JSON.stringify({ autoReview: true, autoRework: true, maxRework: 3, checkCmd: 'node flip.mjs' }))
+  writeFileSync(join(repo, 'flip.mjs'), 'import { readFileSync, writeFileSync } from "node:fs"\nconst p = process.env.ORZIC_TEST_CFG\nconst d = JSON.parse(readFileSync(p, "utf8"))\nd.autoReview = false\nwriteFileSync(p, JSON.stringify(d))\n')
+  const r = runDriver({ ORZIC_AGENT_DIR: agent, ORZIC_CWD: repo, ORZIC_SESSION_FILE: exact, ORZIC_TEST_CFG: cfg, ORZIC_OMP_BIN: NODE, ORZIC_OMP_PREARGS: JSON.stringify([STUB]), ORZIC_STUB_MODE: 'pass' })
+  assert.equal(r.status, 0)
+  const calls = existsSync(join(agent, 'orzic-stub-calls.jsonl')) ? readFileSync(join(agent, 'orzic-stub-calls.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l).args) : []
+  assert.equal(calls.filter((a) => a[0] === '--model').length, 0, 'judge must not start after autoReview is turned off')
+  assert.match(readFileSync(join(agent, `orzic-driver-${keyOf(repo)}.log`), 'utf8'), /autoReview disabled before judge/)
 })
 
 test('driver: deterministic gate — failing checkCmd returns rework WITHOUT calling the judge', () => {

@@ -175,6 +175,7 @@ const stopWatch = setInterval(checkStop, 400)
 const sessionInfo = resolveSession({ pinnedFile: process.env.ORZIC_SESSION_FILE || null, sessionsRoot: join(AGENT, 'sessions'), cwd })
 log(`driver start cwd=${cwd} session=${sessionInfo.path} exact=${sessionInfo.exact} src=${sessionInfo.source}`)
 let round = 0
+let lastInjectedSha = ''
 try {
   while (true) {
     if (!heartbeatLock(lock)) { log('lock lost (another driver took over) — exit'); break } // zombie revival must not keep running
@@ -184,6 +185,13 @@ try {
     if (!acc.autoReview) { log('autoReview disabled — exit'); break }
     const head = await gitHead()
     const sha = head.out?.trim() || ''
+    // The @default reviewer is intentionally not deduped across processes (the
+    // resolved model can change), so within one run an unchanged revision after
+    // an inject would be judged and re-injected until maxRework. Stop here.
+    if (sha && sha === lastInjectedSha) {
+      log(`revision ${sha.slice(0, 10)} unchanged after rework — stop to avoid duplicate inject`)
+      break
+    }
     // Dedup key = revision + reviewer model + rule text + the GATE command —
     // a new/changed checkCmd is a different review, so an old PASS can never
     // bypass a freshly configured failing gate.
@@ -221,7 +229,9 @@ try {
       if (!diff.out.trim()) { if (!existsSync(REVIEW)) writeReview({ at: new Date().toISOString(), verdict: 'unreviewed', findings: [], summary: '无 diff', revision: sha || undefined, dedupKey: dedupKey || undefined }); log('no diff'); break }
       checkStop()
       if (stopRequested) { writeReview({ at: new Date().toISOString(), verdict: 'unreviewed', findings: [], summary: `已手动停止(第${round}轮)`, round }); log('stop before judge'); break }
-      review = await judge(diff.out, acc, plan)
+      const beforeJudge = readAcc()
+      if (!beforeJudge.autoReview) { log('autoReview disabled before judge — exit'); break }
+      review = await judge(diff.out, beforeJudge, plan)
     }
 
     // The judge can run for minutes; the stop flag and the acceptance config
@@ -264,6 +274,7 @@ try {
   round++
   const findings = review.findings.slice(0, 10).map((f) => `- [${f.severity}] ${f.file}${f.line != null ? `:${f.line}` : ''} ${f.message}`).join('\n')
   const msg = `验收未通过(REWORK,第${round}轮)。按以下 findings 返工:\n${findings}\n\n要求:修复后自检,确保不再触发同类问题。`
+  lastInjectedSha = sha
   const inj = await run(['-r', sessionInfo.path, '--model', '@default', '--mode', 'json', msg], 600_000)
   if (!heartbeatLock(lock)) { log('lock lost — exit'); break }
   if (inj.err) {
