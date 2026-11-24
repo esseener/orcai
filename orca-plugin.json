@@ -13,7 +13,7 @@
   "homepage": "https://github.com/esseener/orcai",
   "license": "MIT",
   "engines": {
-    "orca": ">=1.4.271"
+    "orca": ">=1.4.268"
   },
   "execution": "trusted-worker",
   "pluginApi": 1,
