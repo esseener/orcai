@@ -124,13 +124,46 @@ test('whitespace-only identifiers are rejected', () => {
 
 const fusionModel = (id) => ({ id, name: id.split('/').pop(), thinking: [] })
 
-test('fusion combos are recognised by id segment, not by loose substring', () => {
+test('only devin/fusion-* selectors are hidden', () => {
   assert.equal(isFusionModel(fusionModel('devin/fusion-claude-opus-5-high-sidekick-swe-2-high')), true)
   assert.equal(isFusionModel(fusionModel('devin/fusion-alpha')), true)
+  assert.equal(isFusionModel(fusionModel('Devin/Fusion-Upper')), true)
   assert.equal(isFusionModel(fusionModel('devin/swe-2')), false)
+  assert.equal(isFusionModel(fusionModel('devin/my-fusion-model')), false)
+  assert.equal(isFusionModel(fusionModel('other/fusion-alpha')), false)
   assert.equal(isFusionModel(fusionModel('magpie/fusionless-model')), false)
   assert.equal(isFusionModel({ id: 'x/infusion' }), false)
   assert.equal(isFusionModel({}), false)
+})
+
+test('non-devin fusion names stay visible', () => {
+  const models = [
+    { id: 'other/fusion-alpha', name: 'Fusion Alpha', thinking: [] },
+    { id: 'devin/my-fusion-model', name: 'My Fusion Model', thinking: [] },
+    { id: 'devin/fusion-real-combo', name: 'fusion-real-combo', thinking: [] },
+  ]
+  assert.deepEqual(filterModelChoices(models, 'fusion').map((m) => m.id), [
+    'other/fusion-alpha',
+    'devin/my-fusion-model',
+  ])
+})
+
+test('Chinese model names still match', () => {
+  const models = [
+    { id: 'magpie/钣金-助手', name: '智能钣金拆解', thinking: [] },
+    { id: 'devin/swe-2', name: 'SWE-2', thinking: [] },
+  ]
+  assert.deepEqual(filterModelChoices(models, '钣金').map((m) => m.id), ['magpie/钣金-助手'])
+  assert.deepEqual(filterModelChoices(models, '智能钣金').map((m) => m.id), ['magpie/钣金-助手'])
+  assert.deepEqual(filterModelChoices(models, 'swe2').map((m) => m.id), ['devin/swe-2'])
+})
+
+test('a punctuation-only query keeps plain substring matching', () => {
+  const models = [
+    { id: 'a/b-1', name: 'B One', thinking: [] },
+    { id: 'a/c2', name: 'C Two', thinking: [] },
+  ]
+  assert.deepEqual(filterModelChoices(models, '-').map((m) => m.id), ['a/b-1'])
 })
 
 test('picker hides fusion combos that outnumber and overshadow the real model', () => {

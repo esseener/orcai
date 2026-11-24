@@ -21,6 +21,7 @@ const models: OmpModel[] = [
   ...Array.from({ length: 285 }, (_, i) => fusionRow(i)),
   { id: 'devin/swe-2', name: 'SWE-2', provider: 'devin', thinking: ['high'] },
   { id: 'devin/swe-2-fast', name: 'SWE-2 Fast', provider: 'devin', thinking: [] },
+  { id: 'magpie/智能钣金', name: '智能钣金拆解', provider: 'magpie', thinking: [] },
 ]
 
 const fusion = {
@@ -68,7 +69,13 @@ test('searching swe2 lists the real SWE-2 models and no fusion combo', async () 
 test('an unfiltered list never draws a fusion combo', async () => {
   const test = await openPicker()
   const listed = rows(test)
-  assert.deepEqual(listed, ['devin · SWE-2', 'devin · SWE-2 Fast'])
+  assert.deepEqual(listed, ['devin · SWE-2', 'devin · SWE-2 Fast', 'magpie · 智能钣金拆解'])
+})
+
+test('Chinese model names stay searchable', async () => {
+  const test = await openPicker()
+  await test.type({ label: '搜索' }, '钣金')
+  assert.deepEqual(rows(test), ['magpie · 智能钣金拆解'])
 })
 
 test('picking a filtered model writes it as the plan model', async () => {

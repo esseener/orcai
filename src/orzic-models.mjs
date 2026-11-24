@@ -33,41 +33,51 @@ export function parseModelRows(rows) {
 // The devin provider ships ~1000 `fusion-<driver>-<effort>-sidekick-<sidekick>`
 // combos next to ~76 plain models. They are one-off compositions of the same
 // models, swamp every search ("swe2" hits ~285 of them), and push the real
-// entry past the picker's row cap. Hide them unless the user asks for them.
-const FUSION_SEGMENT = /(?:^|[/_.-])fusion(?:[/_.-]|$)/i
+// entry past the picker's row cap. Hide exactly those selectors — a model named
+// `my-fusion-model`, or another provider's `fusion-alpha`, stays visible.
+const FUSION_SELECTOR_PREFIX = 'devin/fusion-'
 
 export function isFusionModel(model) {
-  const id = typeof model?.id === 'string' ? model.id : ''
-  return FUSION_SEGMENT.test(id)
+  const id = typeof model?.id === 'string' ? model.id.trim().toLowerCase() : ''
+  return id.startsWith(FUSION_SELECTOR_PREFIX)
 }
 
 // "swe2" must find `devin/swe-2`: compare with separators stripped, and rank
 // id hits above name hits so the canonical model is not cut by the row cap.
-const squash = (value) => String(value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '')
+// Unicode letters/digits are kept, so a Chinese model name still matches; a
+// query with no letters/digits at all falls back to plain substring matching.
+const squash = (value) => String(value ?? '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
 
-function rank(model, query) {
-  if (!query) return 0
+function rank(model, needle, raw) {
   const id = squash(model.id)
   const name = squash(model.name)
+  if (!needle) {
+    const plainId = String(model.id ?? '').toLowerCase()
+    const plainName = String(model.name ?? '').toLowerCase()
+    if (plainId.includes(raw)) return 5
+    if (plainName.includes(raw)) return 6
+    return -1
+  }
   // The selector tail is the model itself (`devin/swe-2`), so it outranks a
   // provider-wide id or name hit.
   const tail = squash(String(model.id ?? '').slice(String(model.id ?? '').lastIndexOf('/') + 1))
-  if (id === query || tail === query) return 0
-  if (tail.startsWith(query)) return 1
-  if (name === query) return 2
-  if (name.startsWith(query)) return 3
-  if (id.startsWith(query)) return 4
-  if (id.includes(query)) return 5
-  if (name.includes(query)) return 6
+  if (id === needle || tail === needle) return 0
+  if (tail.startsWith(needle)) return 1
+  if (name === needle) return 2
+  if (name.startsWith(needle)) return 3
+  if (id.startsWith(needle)) return 4
+  if (id.includes(needle)) return 5
+  if (name.includes(needle)) return 6
   return -1
 }
 
 export function filterModelChoices(models, query, { limit = 200 } = {}) {
-  const needle = squash(query)
+  const raw = String(query ?? '').trim().toLowerCase()
+  const needle = squash(raw)
   const scored = []
   for (const model of models) {
     if (isFusionModel(model)) continue
-    const score = rank(model, needle)
+    const score = raw ? rank(model, needle, raw) : 0
     if (score < 0) continue
     scored.push({ model, score })
   }
