@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="theme-color" content="#000000" />
+  <title>&#8203;</title>
+  <link rel="icon" type="image/png" href="/favicon-v2.png" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="topbar-brand">
+          <div class="topbar-mark"><img src="/logo.png" alt="Orzic" /></div>
+          <div class="topbar-wordmark">Orzic</div>
+        </div>
+        <div class="top-actions">
+          <span class="pill" id="pill-version">OMP · …</span>
+          <button id="btn-refresh" class="btn ghost">刷新</button>
+          <button id="btn-shutdown" class="btn danger">退出服务</button>
+        </div>
+      </div>
+    </header>
+
+    <div class="app-body">
+      <aside class="sidebar">
+        <nav class="tabs" id="tabs" aria-label="控制台页面">
+          <div class="nav-label">工作台</div>
+          <button class="tab active" data-tab="roles" aria-current="page">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg>
+            <span>角色与模型</span>
+          </button>
+          <button class="tab" data-tab="connectors">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.1 0l-2 2A5 5 0 0 0 12 20.1l1.1-1.1"/></svg>
+            <span>MCP 连接</span>
+          </button>
+          <button class="tab" data-tab="opencode">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 10l2 2-2 2M12 14h4"/></svg>
+            <span>OpenCode</span>
+          </button>
+          <button class="tab" data-tab="codex">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l-5 7 5 7M16 5l5 7-5 7"/><path d="M13 4l-2 16"/></svg>
+            <span>Codex</span>
+          </button>
+          <button class="tab" data-tab="overview">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg>
+            <span>概览</span>
+          </button>
+        </nav>
+        <div class="sidebar-foot">
+          <div class="sidebar-status"><span class="status-dot" aria-hidden="true"></span> OMP + OpenCode + Codex</div>
+          <div>适配器逐步扩展</div>
+        </div>
+      </aside>
+
+      <main class="content">
+        <section id="tab-roles" class="panel active">
+          <div class="page-head page-head-compact">
+            <div class="page-head-main">
+              <div class="page-kicker">01 / 角色路由</div>
+              <h1>模型</h1>
+              <p>为规划、执行、验收选择模型与思考强度；保存后写入 OMP。</p>
+            </div>
+            <div class="poster-stack" aria-hidden="true">
+              <div class="poster-strip strip-plan"><span class="poster-num">01</span><strong>规划</strong><em>READ</em></div>
+              <div class="poster-strip strip-execute"><span class="poster-num">02</span><strong>执行</strong><em>WRITE</em></div>
+              <div class="poster-strip strip-review"><span class="poster-num">03</span><strong>验收</strong><em>JUDGE</em></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title">路由与默认强度</div>
+                <div class="muted">写入 OMP 的 plan.enabled / advisor.enabled / task.prewalk / defaultThinkingLevel</div>
+              </div>
+              <div class="head-actions">
+                <span class="pill muted-pill" id="models-count">模型目录 · …</span>
+                <button id="btn-refresh-models" class="btn ghost small">刷新模型</button>
+              </div>
+            </div>
+            <div class="switches">
+              <label class="chk"><input type="checkbox" id="flag-plan" /> Plan 路由 (plan.enabled)</label>
+              <label class="chk"><input type="checkbox" id="flag-advisor" /> Advisor (advisor.enabled)</label>
+              <label class="chk"><input type="checkbox" id="flag-prewalk" /> Task Prewalk (task.prewalk)</label>
+            </div>
+            <div class="form-row">
+              <label class="field-inline">
+                <span>全局默认思考强度 (defaultThinkingLevel)</span>
+                <select id="default-thinking"></select>
+              </label>
+              <div class="muted hint">角色未单独指定强度时，跟随这里。</div>
+            </div>
+            <div class="muted hint">每个角色独立设置模型与思考档；思考越高输出 token 越多，按任务选择。</div>
+          </div>
+
+          <div id="omp-error" class="card error-card hidden"></div>
+          <div id="departments" class="departments"></div>
+
+          <div class="savebar">
+            <div class="muted" id="dirty-hint">已同步</div>
+            <div class="row-end">
+              <button id="btn-reset" class="btn ghost">还原</button>
+              <button id="btn-save" class="btn primary" disabled>已同步</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="tab-connectors" class="panel">
+          <div class="page-head">
+            <div class="page-head-main">
+              <div class="page-kicker">02 / 接入</div>
+              <h1>MCP 连接</h1>
+              <p>把 Fusion 注册为 MCP 服务，或复制配置片段到其他 Agent。</p>
+            </div>
+            <div class="page-number" aria-hidden="true">02</div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title">注册目标</div>
+                <div class="muted">写入前自动备份原配置，只合并 <code>mcpServers</code> 条目。</div>
+              </div>
+              <span class="pill" id="conn-server">fusion</span>
+            </div>
+            <div id="targets-list" class="targets-grid"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-title">接入自定义 JSON 配置</div>
+            <div class="muted">适用于任何使用标准 <code>mcpServers</code> 的桌面软件或 CLI。</div>
+            <div class="form-grid">
+              <label><span>显示名称</span><input id="custom-label" type="text" placeholder="例如 MyAgent" /></label>
+              <label><span>配置文件绝对路径</span><input id="custom-path" type="text" placeholder="C:\Users\...\mcp.json" /></label>
+            </div>
+            <div class="row-end">
+              <button id="btn-connect-custom" class="btn primary">接入并保存</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-title">手动复制片段</div>
+            <div class="snippet-tabs" id="snippet-tabs">
+              <button class="chip active" data-snip="mcpServers">通用 mcpServers</button>
+              <button class="chip" data-snip="opencode">OpenCode</button>
+              <button class="chip" data-snip="zed">Zed context_servers</button>
+              <button class="chip" data-snip="codex">Codex TOML</button>
+            </div>
+            <pre id="snippet-code" class="codebox"></pre>
+            <div class="row-end">
+              <button id="btn-copy-snippet" class="btn ghost">复制片段</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="tab-opencode" class="panel">
+          <div class="page-head">
+            <div class="page-head-main">
+              <div class="page-kicker">03 / 受控会话</div>
+              <h1>OpenCode</h1>
+              <p>为规划、执行、验收选择模型与 variant；在受控会话中先规划、确认后执行。</p>
+              <div class="head-actions">
+                <span class="pill" id="oc-version">OpenCode · …</span>
+                <button id="oc-refresh" class="btn ghost small">刷新</button>
+              </div>
+            </div>
+            <div class="page-number" aria-hidden="true">03</div>
+          </div>
+
+          <div id="oc-error" class="card error-card hidden"></div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title">连接与环境</div>
+                <div class="muted">MCP 注册与受控会话是两条独立链路；只注册 MCP 不会替 OpenCode 切模型。</div>
+              </div>
+              <span class="pill" id="oc-conn-status">读取中</span>
+            </div>
+            <div id="oc-env" class="kv"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title">角色模型</div>
+                <div class="muted">保存到 Fusion 状态，发回合时用 <code>--model</code> 应用；不写 OMP 配置，也不改 OpenCode 默认模型。</div>
+              </div>
+              <div class="head-actions">
+                <span class="pill muted-pill" id="oc-models-count">模型目录 · …</span>
+                <button id="oc-refresh-models" class="btn ghost small">刷新模型</button>
+              </div>
+            </div>
+            <div id="oc-roles" class="dept-roles"></div>
+            <div class="savebar">
+              <div class="muted" id="oc-dirty-hint">已同步</div>
+              <div class="row-end">
+                <button id="oc-reset" class="btn ghost">还原</button>
+                <button id="oc-save" class="btn primary" disabled>已同步</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title">受控会话</div>
+                <div class="muted">规划使用 plan agent；确认后在同一个会话用 build agent 执行；验收使用只读 fusion-review。</div>
+              </div>
+              <span class="pill" id="oc-session-pill">未开始</span>
+            </div>
+            <div class="form-grid">
+              <label><span>工作区路径</span><input id="oc-cwd" type="text" placeholder="C:\path\to\repo" /></label>
+              <label><span>本轮任务</span><textarea id="oc-task" rows="3" placeholder="例如：修一个小的边界问题"></textarea></label>
+            </div>
+            <div class="row-end oc-actions">
+              <button id="oc-plan" class="btn primary">开始规划</button>
+              <button id="oc-execute" class="btn" disabled>确认并执行</button>
+              <button id="oc-review" class="btn" disabled>验收</button>
+              <button id="oc-reset-session" class="btn ghost">清除会话</button>
+            </div>
+            <div id="oc-session-status" class="muted hint"></div>
+            <div class="oc-outputs">
+              <div>
+                <div class="card-title">规划</div>
+                <pre id="oc-plan-output" class="codebox">尚未开始</pre>
+              </div>
+              <div>
+                <div class="card-title">执行</div>
+                <pre id="oc-exec-output" class="codebox">尚未执行</pre>
+              </div>
+              <div>
+                <div class="card-title">验收</div>
+                <div id="oc-review-result" class="review-result"><span class="muted">尚未运行</span></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="tab-codex" class="panel">
+          <div class="page-head">
+            <div class="page-head-main">
+              <div class="page-kicker">04 / 受控会话</div>
+              <h1>Codex</h1>
+              <p>为规划、执行、验收选择 Codex 模型与思考档；规划确认后在同一会话执行。</p>
+              <div class="head-actions">
+                <span class="pill" id="cx-version">Codex · …</span>
+                <button id="cx-refresh" class="btn ghost small">刷新</button>
+              </div>
+            </div>
+            <div class="page-number" aria-hidden="true">04</div>
+          </div>
+
+          <div id="cx-error" class="card error-card hidden"></div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title">连接与环境</div>
+                <div class="muted">MCP 注册与受控会话是两条独立链路；注册成功不代表 Codex 已加载工具。</div>
+              </div>
+              <span class="pill" id="cx-conn-status">读取中</span>
+            </div>
+            <div id="cx-env" class="kv"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title">角色模型</div>
+                <div class="muted">保存到 Fusion 状态，按回合传给 App Server；不写 Codex 默认模型，也不改 OMP/OpenCode。</div>
+              </div>
+              <div class="head-actions">
+                <span class="pill muted-pill" id="cx-models-count">模型目录 · …</span>
+                <button id="cx-refresh-models" class="btn ghost small">刷新模型</button>
+              </div>
+            </div>
+            <div id="cx-roles" class="dept-roles"></div>
+            <div class="savebar">
+              <div class="muted" id="cx-dirty-hint">已同步</div>
+              <div class="row-end">
+                <button id="cx-reset" class="btn ghost">还原</button>
+                <button id="cx-save" class="btn primary" disabled>已同步</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title">受控会话</div>
+                <div class="muted">规划与验收使用只读沙箱并禁用 MCP、插件和联网搜索；执行只写目标工作区。</div>
+              </div>
+              <span class="pill" id="cx-session-pill">未开始</span>
+            </div>
+            <div class="form-grid">
+              <label><span>工作区路径</span><input id="cx-cwd" type="text" placeholder="C:\path\to\repo" /></label>
+              <label><span>本轮任务</span><textarea id="cx-task" rows="3" placeholder="例如：修一个小的边界问题"></textarea></label>
+            </div>
+            <div class="row-end oc-actions">
+              <button id="cx-plan" class="btn primary" disabled>开始规划</button>
+              <button id="cx-execute" class="btn" disabled>确认并执行</button>
+              <button id="cx-review" class="btn" disabled>验收</button>
+              <button id="cx-reset-session" class="btn ghost">清除会话</button>
+            </div>
+            <div id="cx-session-status" class="muted hint"></div>
+            <div class="oc-outputs">
+              <div>
+                <div class="card-title">规划</div>
+                <pre id="cx-plan-output" class="codebox">尚未开始</pre>
+              </div>
+              <div>
+                <div class="card-title">执行</div>
+                <pre id="cx-exec-output" class="codebox">尚未执行</pre>
+              </div>
+              <div>
+                <div class="card-title">验收</div>
+                <div id="cx-review-result" class="review-result"><span class="muted">尚未运行</span></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="tab-overview" class="panel">
+          <div class="page-head">
+            <div class="page-head-main">
+              <div class="page-kicker">05 / 运行面板</div>
+              <h1>概览</h1>
+              <p>运行环境、角色快照与跨 Agent 用法。</p>
+            </div>
+            <div class="page-number" aria-hidden="true">05</div>
+          </div>
+
+          <div class="two-col">
+            <div class="card">
+              <div class="card-title">运行环境</div>
+              <div id="overview-env" class="kv"></div>
+            </div>
+            <div class="card">
+              <div class="card-title">角色快照</div>
+              <div id="overview-roles" class="kv"></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-title">在其他 Agent 中使用</div>
+            <pre id="overview-usage" class="codebox"></pre>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

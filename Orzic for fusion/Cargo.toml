@@ -1,0 +1,19 @@
+[package]
+name = "orzic-fusion"
+version = "0.1.0"
+edition = "2021"
+description = "Orzic for fusion: one console and one MCP server for per-role model/thinking routing, starting with OMP."
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+# Pinned to the locally cached version; serde_json only requires ^2.2.
+indexmap = "=2.11.4"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
