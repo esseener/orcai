@@ -1,9 +1,14 @@
 use crate::acceptance;
 use crate::agents::{codex, omp, opencode};
 use crate::connectors::{self, CustomTarget, SERVER_NAME};
+use crate::memory;
 use crate::state;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
+
+#[cfg(windows)]
+#[path = "ui_window.rs"]
+mod ui_window;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -116,6 +121,24 @@ mod win_icon {
     const LR_SHARED: u32 = 0x8000;
     const APP_ICON_RESOURCE: usize = 1;
     const APP_WINDOW_TITLE: &str = "\u{200B}";
+    // Windows 11 DWM attributes. The caption keeps its own colour while the
+    // window is inactive unless we set it explicitly.
+    const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+    const DWMWA_BORDER_COLOR: u32 = 34;
+    const DWMWA_CAPTION_COLOR: u32 = 35;
+    const DWMWA_TEXT_COLOR: u32 = 36;
+    const COLOR_BLACK: u32 = 0x0000_0000;
+    const COLOR_WHITE: u32 = 0x00FF_FFFF;
+
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmSetWindowAttribute(
+            hwnd: isize,
+            attribute: u32,
+            value: *const std::ffi::c_void,
+            size: u32,
+        ) -> i32;
+    }
 
     #[link(name = "user32")]
     extern "system" {
@@ -123,6 +146,7 @@ mod win_icon {
         fn GetWindowTextW(hwnd: isize, buffer: *mut u16, max: i32) -> i32;
         fn GetClassNameW(hwnd: isize, buffer: *mut u16, max: i32) -> i32;
         fn IsWindowVisible(hwnd: isize) -> i32;
+        fn IsWindow(hwnd: isize) -> i32;
         fn SendMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
         fn LoadImageW(
             instance: isize,
@@ -211,6 +235,38 @@ mod win_icon {
         }
     }
 
+    fn paint_frame(hwnd: isize) {
+        unsafe {
+            let dark: i32 = 1;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                &dark as *const i32 as *const std::ffi::c_void,
+                std::mem::size_of::<i32>() as u32,
+            );
+            let caption: u32 = COLOR_BLACK;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_CAPTION_COLOR,
+                &caption as *const u32 as *const std::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_BORDER_COLOR,
+                &caption as *const u32 as *const std::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+            let text: u32 = COLOR_WHITE;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_TEXT_COLOR,
+                &text as *const u32 as *const std::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+        }
+    }
+
     pub fn attach_taskbar_icon(before: Vec<isize>) {
         thread::spawn(move || {
             let mut target = None;
@@ -228,8 +284,16 @@ mod win_icon {
             // Let Edge finish creating its frame, then reapply once in case it resets.
             thread::sleep(Duration::from_millis(700));
             apply_icons(hwnd);
+            paint_frame(hwnd);
             thread::sleep(Duration::from_millis(1200));
             apply_icons(hwnd);
+            paint_frame(hwnd);
+            // Edge can redraw its frame after activation changes; keep the
+            // caption black while this window exists.
+            while unsafe { IsWindow(hwnd) } != 0 {
+                paint_frame(hwnd);
+                thread::sleep(Duration::from_millis(2000));
+            }
         });
     }
 }
@@ -301,6 +365,28 @@ fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
+/// Lightweight catalog for the console: Fusion itself plus every MCP target.
+/// Deliberately avoids reading OMP roles or the model catalog.
+fn agents_payload() -> Value {
+    json!({
+        "fusion": {
+            "version": env!("CARGO_PKG_VERSION"),
+            "executable": connectors::current_exe_string(),
+        },
+        "connectors": connectors::list_all(),
+    })
+}
+
+#[cfg(windows)]
+fn window_action(action: &str) -> Result<(), String> {
+    ui_window::window_action(action)
+}
+
+#[cfg(not(windows))]
+fn window_action(_action: &str) -> Result<(), String> {
+    Err("仅 Windows 桌面窗口支持该操作".into())
+}
+
 fn dispatch_api(
     method: &str,
     path: &str,
@@ -313,9 +399,29 @@ fn dispatch_api(
             life.touch();
             Some(Ok(state::build(false)))
         }
+        ("GET", "/api/omp/status") => {
+            life.touch();
+            let force = query.contains("force=1");
+            Some(Ok(omp::console_status(query.contains("fast=1"), force)))
+        }
+        ("GET", "/api/agents") => {
+            life.touch();
+            Some(Ok(agents_payload()))
+        }
+        ("GET", "/api/session-memory") => {
+            life.touch();
+            Some(Ok(memory::list()))
+        }
         ("POST", "/api/heartbeat") => {
             life.touch();
             Some(Ok(json!({ "ok": true })))
+        }
+        ("POST", "/api/window") => {
+            let action = body
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            Some(window_action(action).map(|_| json!({ "ok": true })))
         }
         ("POST", "/api/closing") => {
             life.mark_closing();
@@ -400,7 +506,7 @@ fn dispatch_api(
                 .and_then(Value::as_bool)
                 .unwrap_or(true);
             Some(
-                connectors::connect_target_by_id(id, enable).map(|_| state::build(false)),
+                connectors::connect_target_by_id(id, enable).map(|_| agents_payload()),
             )
         }
         ("POST", "/api/connectors/custom") => Some((|| {
@@ -443,12 +549,12 @@ fn dispatch_api(
                     server_name: SERVER_NAME.to_string(),
                 })?;
             }
-            Ok(state::build(false))
+            Ok(agents_payload())
         })()),
         ("POST", "/api/connectors/remove-custom") => Some((|| {
             let id = body.get("id").and_then(Value::as_str).unwrap_or("");
             connectors::remove_custom_target(id)?;
-            Ok(state::build(false))
+            Ok(agents_payload())
         })()),
         ("POST", "/api/shutdown") => {
             life.shutdown.store(true, Ordering::SeqCst);
@@ -616,25 +722,7 @@ fn handle_client(mut stream: TcpStream, token: &str, life: &Arc<UiLifecycle>) {
     }
 }
 
-pub fn run_ui_server(port: u16, open_window: bool) -> Result<(), String> {
-    let listener = TcpListener::bind(("127.0.0.1", port))
-        .map_err(|e| format!("无法监听 127.0.0.1:{port}: {e}"))?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|e| format!("设置非阻塞监听失败: {e}"))?;
-    let actual_port = listener
-        .local_addr()
-        .map(|addr| addr.port())
-        .map_err(|e| e.to_string())?;
-    let token = generate_token();
-    let url = format!("http://127.0.0.1:{actual_port}/#token={token}");
-
-    println!("Orzic for fusion 控制台已启动：{url}");
-    if open_window {
-        open_desktop_window(&url);
-    }
-
-    let life = UiLifecycle::new();
+fn serve_connections(listener: TcpListener, token: String, life: Arc<UiLifecycle>) {
     while !life.should_exit() {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -649,5 +737,57 @@ pub fn run_ui_server(port: u16, open_window: bool) -> Result<(), String> {
             Err(_) => break,
         }
     }
+}
+
+pub fn run_ui_server(port: u16, open_window: bool) -> Result<(), String> {
+    let listener = TcpListener::bind(("127.0.0.1", port))
+        .map_err(|e| format!("无法监听 127.0.0.1:{port}: {e}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("设置非阻塞监听失败: {e}"))?;
+    let actual_port = listener
+        .local_addr()
+        .map(|addr| addr.port())
+        .map_err(|e| e.to_string())?;
+    let token = generate_token();
+    let url = format!("http://127.0.0.1:{actual_port}/#token={token}");
+
+    println!("Orzic for fusion 控制台已启动：{url}");
+
+    let life = UiLifecycle::new();
+    let server = {
+        let life = Arc::clone(&life);
+        let token = token.clone();
+        thread::spawn(move || serve_connections(listener, token, life))
+    };
+
+    // Warm the probe caches while the page loads, so the first Agent detail
+    // does not pay for config inspection plus two CLI spawns.
+    thread::spawn(|| {
+        let _ = connectors::list_all();
+        let _ = crate::agents::opencode::version();
+        let _ = crate::agents::codex::version();
+        let _ = crate::agents::codex::login_status();
+        let _ = crate::agents::omp::read_status();
+        // Model catalogs are cached for five minutes; refresh them in the
+        // background so the first detail open does not spawn the CLI/App
+        // Server on the click.
+        let _ = crate::agents::opencode::models(false);
+        let _ = crate::agents::codex::models(false);
+    });
+
+    if open_window {
+        #[cfg(windows)]
+        {
+            if let Err(error) = ui_window::run(&url, Arc::clone(&life)) {
+                eprintln!("原生 WebView2 窗口不可用（{error}），回退到 Edge 窗口");
+                open_desktop_window(&url);
+            }
+        }
+        #[cfg(not(windows))]
+        open_desktop_window(&url);
+    }
+
+    let _ = server.join();
     Ok(())
 }

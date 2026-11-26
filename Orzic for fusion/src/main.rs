@@ -4,7 +4,9 @@ mod acceptance;
 mod agents;
 mod config;
 mod connectors;
+mod handoff;
 mod mcp;
+mod memory;
 mod roles;
 mod route;
 mod state;
@@ -133,6 +135,20 @@ fn main() {
                 "connectors": connectors::list_all(),
             });
             println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        }
+        "mem-report" => {
+            let mut buffer = String::new();
+            let _ = std::io::stdin().read_to_string(&mut buffer);
+            let result = serde_json::from_str::<serde_json::Value>(&buffer)
+                .map_err(|e| format!("mem-report 需要 JSON：{e}"))
+                .and_then(|value| memory::cli(&value));
+            match result {
+                Ok(value) => println!("{}", serde_json::to_string(&value).unwrap_or_default()),
+                Err(err) => {
+                    eprintln!("内存上报失败：{err}");
+                    process::exit(1);
+                }
+            }
         }
         "route" => {
             let mut session = "default".to_string();

@@ -1025,6 +1025,10 @@ impl CodexRpc {
         Ok(None)
     }
 
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     fn close(&mut self) {
         kill_process_tree(&mut self.child);
     }
@@ -1166,6 +1170,7 @@ fn run_exec(
     sandbox: &str,
     prompt: &str,
     output_schema: Option<&Path>,
+    phase: &str,
 ) -> Result<ExecOutcome, String> {
     let exe = find_executable();
     let cwd_text = cwd.display().to_string();
@@ -1201,6 +1206,16 @@ fn run_exec(
     let mut child = command
         .spawn()
         .map_err(|e| format!("无法运行 Codex exec ({exe}): {e}"))?;
+    let _memory = crate::memory::Track::start(
+        "codex",
+        format!("run:{}", child.id()),
+        child.id(),
+        cwd.display().to_string(),
+        phase,
+        "",
+        "run",
+        "本次 Codex exec 运行进程的内存；退出后不再上报",
+    );
     let mut stdin = child.stdin.take().ok_or("无法写入 Codex exec")?;
     let prompt = prompt.to_string();
     thread::spawn(move || {
@@ -1285,6 +1300,7 @@ fn run_plan(
         "read-only",
         &plan_prompt(task),
         None,
+        "规划",
     )?;
     if let Ok((actual_model, actual_effort)) = read_thread_settings(&outcome.thread_id) {
         outcome.actual_model = actual_model;
@@ -1300,6 +1316,16 @@ fn run_execute(
     effort: &str,
 ) -> Result<TurnOutcome, String> {
     let mut rpc = CodexRpc::start(false)?;
+    let _memory = crate::memory::Track::start(
+        "codex",
+        thread_id.to_string(),
+        rpc.pid(),
+        cwd.display().to_string(),
+        "执行",
+        "",
+        "run",
+        "本次 Codex 执行进程的内存；退出后不再上报",
+    );
     rpc.initialize()?;
     rpc.thread_resume(cwd, thread_id, model)?;
     let mut outcome = rpc.turn(
@@ -1347,6 +1373,7 @@ fn run_review(
         "read-only",
         &review_prompt(plan, diff),
         Some(&schema_path),
+        "验收",
     );
     let _ = fs::remove_file(&schema_path);
     let mut outcome = result?;
@@ -1357,11 +1384,54 @@ fn run_review(
     Ok(outcome)
 }
 
+const PROBE_TTL: Duration = Duration::from_secs(60);
+
+static VERSION_CACHE: Mutex<Option<(Instant, String)>> = Mutex::new(None);
+static LOGIN_CACHE: Mutex<Option<(Instant, String)>> = Mutex::new(None);
+
+pub fn invalidate_probe_cache() {
+    if let Ok(mut slot) = VERSION_CACHE.lock() {
+        *slot = None;
+    }
+    if let Ok(mut slot) = LOGIN_CACHE.lock() {
+        *slot = None;
+    }
+}
+
+fn cached_probe(
+    slot: &Mutex<Option<(Instant, String)>>,
+    probe: impl FnOnce() -> String,
+) -> String {
+    if let Ok(guard) = slot.lock() {
+        if let Some((at, text)) = guard.as_ref() {
+            if at.elapsed() < PROBE_TTL {
+                return text.clone();
+            }
+        }
+    }
+    let text = probe();
+    if let Ok(mut guard) = slot.lock() {
+        *guard = Some((Instant::now(), text.clone()));
+    }
+    text
+}
+
+/// Both `codex --version` and `codex login status` spawn a process (~150 ms
+/// each) and are re-read on every Agent detail load. They only change on
+/// upgrade or login, so hold them for a minute; `force` clears them first.
 pub fn version() -> Result<String, String> {
-    run_cli(&["--version"], None, &[]).map(|text| text.trim().to_string())
+    Ok(cached_probe(&VERSION_CACHE, || {
+        run_cli(&["--version"], None, &[])
+            .map(|text| text.trim().to_string())
+            .unwrap_or_default()
+    }))
 }
 
 pub fn login_status() -> String {
+    cached_probe(&LOGIN_CACHE, login_status_uncached)
+}
+
+fn login_status_uncached() -> String {
     let exe = find_executable();
     let mut command = cli_command(&["login", "status"], &[]);
     command
@@ -1394,6 +1464,9 @@ pub fn login_status() -> String {
 }
 
 pub fn status(cwd: &str, force_models: bool) -> Value {
+    if force_models {
+        invalidate_probe_cache();
+    }
     let key = normalize_cwd(cwd);
     let (models, model_error) = match models(force_models) {
         Ok(list) => (list, None),

@@ -18,32 +18,32 @@
           <div class="topbar-wordmark">Orzic</div>
         </div>
         <div class="top-actions">
-          <span class="pill" id="pill-version">OMP · …</span>
+          <span class="pill" id="pill-fusion">Fusion · …</span>
           <button id="btn-refresh" class="btn ghost">刷新</button>
           <button id="btn-shutdown" class="btn danger">退出服务</button>
+          <div class="win-controls" aria-label="窗口控制">
+            <button class="win-btn" data-window="minimize" aria-label="最小化">
+              <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6h8" /></svg>
+            </button>
+            <button class="win-btn" data-window="maximize" aria-label="最大化">
+              <svg viewBox="0 0 12 12" aria-hidden="true"><rect x="2.4" y="2.4" width="7.2" height="7.2" /></svg>
+            </button>
+            <button class="win-btn win-close" data-window="close" aria-label="关闭">
+              <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.6 2.6l6.8 6.8M9.4 2.6l-6.8 6.8" /></svg>
+            </button>
+          </div>
         </div>
       </div>
     </header>
 
+    <div class="app-scroll">
     <div class="app-body">
       <aside class="sidebar">
         <nav class="tabs" id="tabs" aria-label="控制台页面">
           <div class="nav-label">工作台</div>
-          <button class="tab active" data-tab="roles" aria-current="page">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg>
-            <span>角色与模型</span>
-          </button>
-          <button class="tab" data-tab="connectors">
+          <button class="tab active" data-tab="agents" aria-current="page">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.1 0l-2 2A5 5 0 0 0 12 20.1l1.1-1.1"/></svg>
-            <span>MCP 连接</span>
-          </button>
-          <button class="tab" data-tab="opencode">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 10l2 2-2 2M12 14h4"/></svg>
-            <span>OpenCode</span>
-          </button>
-          <button class="tab" data-tab="codex">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l-5 7 5 7M16 5l5 7-5 7"/><path d="M13 4l-2 16"/></svg>
-            <span>Codex</span>
+            <span>Agent 与 MCP</span>
           </button>
           <button class="tab" data-tab="overview">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg>
@@ -57,18 +57,33 @@
       </aside>
 
       <main class="content">
-        <section id="tab-roles" class="panel active">
+        <section id="tab-omp" class="panel">
+          <button class="btn ghost small detail-back" data-back>← Agent 列表</button>
           <div class="page-head page-head-compact">
             <div class="page-head-main">
-              <div class="page-kicker">01 / 角色路由</div>
-              <h1>模型</h1>
-              <p>为规划、执行、验收选择模型与思考强度；保存后写入 OMP。</p>
+              <div class="page-kicker">Agent 配置 / 角色路由</div>
+              <h1 id="omp-title" tabindex="-1">OMP</h1>
+              <p>为规划、执行、验收选择模型与思考强度；保存后写入 OMP 配置。</p>
             </div>
             <div class="poster-stack" aria-hidden="true">
               <div class="poster-strip strip-plan"><span class="poster-num">01</span><strong>规划</strong><em>READ</em></div>
               <div class="poster-strip strip-execute"><span class="poster-num">02</span><strong>执行</strong><em>WRITE</em></div>
               <div class="poster-strip strip-review"><span class="poster-num">03</span><strong>验收</strong><em>JUDGE</em></div>
             </div>
+          </div>
+
+          <div id="omp-mcp"></div>
+          <div id="omp-memory"></div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title">OMP 环境</div>
+                <div class="muted">读取自 omp CLI；只在这个详情里显示。</div>
+              </div>
+              <span class="pill" id="omp-version">OMP · …</span>
+            </div>
+            <div id="omp-env" class="kv"></div>
           </div>
 
           <div class="card">
@@ -109,25 +124,25 @@
           </div>
         </section>
 
-        <section id="tab-connectors" class="panel">
+        <section id="tab-agents" class="panel active">
           <div class="page-head">
             <div class="page-head-main">
-              <div class="page-kicker">02 / 接入</div>
-              <h1>MCP 连接</h1>
-              <p>把 Fusion 注册为 MCP 服务，或复制配置片段到其他 Agent。</p>
+              <div class="page-kicker">01 / 接入</div>
+              <h1 id="agents-title" tabindex="-1">Agent 与 MCP</h1>
+              <p>先选 Agent，再打开它的配置。已注册表示该客户端的配置里有 fusion 条目，不代表当前会话已加载。</p>
             </div>
-            <div class="page-number" aria-hidden="true">02</div>
+            <div class="page-number" aria-hidden="true">01</div>
           </div>
 
           <div class="card">
             <div class="card-head">
               <div>
-                <div class="card-title">注册目标</div>
+                <div class="card-title">Agent 列表</div>
                 <div class="muted">写入前自动备份原配置，只合并 <code>mcpServers</code> 条目。</div>
               </div>
               <span class="pill" id="conn-server">fusion</span>
             </div>
-            <div id="targets-list" class="targets-grid"></div>
+            <div id="agents-list" class="targets-grid"></div>
           </div>
 
           <div class="card">
@@ -158,18 +173,21 @@
         </section>
 
         <section id="tab-opencode" class="panel">
+          <button class="btn ghost small detail-back" data-back>← Agent 列表</button>
           <div class="page-head">
             <div class="page-head-main">
-              <div class="page-kicker">03 / 受控会话</div>
-              <h1>OpenCode</h1>
+              <div class="page-kicker">Agent 配置 / 受控会话</div>
+              <h1 id="oc-title" tabindex="-1">OpenCode</h1>
               <p>为规划、执行、验收选择模型与 variant；在受控会话中先规划、确认后执行。</p>
               <div class="head-actions">
                 <span class="pill" id="oc-version">OpenCode · …</span>
                 <button id="oc-refresh" class="btn ghost small">刷新</button>
               </div>
             </div>
-            <div class="page-number" aria-hidden="true">03</div>
           </div>
+
+          <div id="oc-mcp"></div>
+          <div id="oc-memory"></div>
 
           <div id="oc-error" class="card error-card hidden"></div>
 
@@ -179,7 +197,6 @@
                 <div class="card-title">连接与环境</div>
                 <div class="muted">MCP 注册与受控会话是两条独立链路；只注册 MCP 不会替 OpenCode 切模型。</div>
               </div>
-              <span class="pill" id="oc-conn-status">读取中</span>
             </div>
             <div id="oc-env" class="kv"></div>
           </div>
@@ -242,18 +259,21 @@
         </section>
 
         <section id="tab-codex" class="panel">
+          <button class="btn ghost small detail-back" data-back>← Agent 列表</button>
           <div class="page-head">
             <div class="page-head-main">
-              <div class="page-kicker">04 / 受控会话</div>
-              <h1>Codex</h1>
+              <div class="page-kicker">Agent 配置 / 受控会话</div>
+              <h1 id="cx-title" tabindex="-1">Codex</h1>
               <p>为规划、执行、验收选择 Codex 模型与思考档；规划确认后在同一会话执行。</p>
               <div class="head-actions">
                 <span class="pill" id="cx-version">Codex · …</span>
                 <button id="cx-refresh" class="btn ghost small">刷新</button>
               </div>
             </div>
-            <div class="page-number" aria-hidden="true">04</div>
           </div>
+
+          <div id="cx-mcp"></div>
+          <div id="cx-memory"></div>
 
           <div id="cx-error" class="card error-card hidden"></div>
 
@@ -263,7 +283,6 @@
                 <div class="card-title">连接与环境</div>
                 <div class="muted">MCP 注册与受控会话是两条独立链路；注册成功不代表 Codex 已加载工具。</div>
               </div>
-              <span class="pill" id="cx-conn-status">读取中</span>
             </div>
             <div id="cx-env" class="kv"></div>
           </div>
@@ -325,24 +344,38 @@
           </div>
         </section>
 
+        <section id="tab-agent" class="panel">
+          <button class="btn ghost small detail-back" data-back>← Agent 列表</button>
+          <div class="page-head">
+            <div class="page-head-main">
+              <div class="page-kicker">Agent 配置 / MCP</div>
+              <h1 id="agent-title" tabindex="-1">Agent</h1>
+              <p id="agent-subtitle">仅支持 MCP 注册；Fusion 不管理它的角色模型或受控会话。</p>
+            </div>
+          </div>
+
+          <div id="agent-mcp"></div>
+          <div id="agent-memory"></div>
+        </section>
+
         <section id="tab-overview" class="panel">
           <div class="page-head">
             <div class="page-head-main">
-              <div class="page-kicker">05 / 运行面板</div>
+              <div class="page-kicker">02 / 运行面板</div>
               <h1>概览</h1>
-              <p>运行环境、角色快照与跨 Agent 用法。</p>
+              <p>Fusion 自身信息、各 Agent 能力与 MCP 注册汇总。</p>
             </div>
-            <div class="page-number" aria-hidden="true">05</div>
+            <div class="page-number" aria-hidden="true">02</div>
           </div>
 
           <div class="two-col">
             <div class="card">
-              <div class="card-title">运行环境</div>
-              <div id="overview-env" class="kv"></div>
+              <div class="card-title">Fusion</div>
+              <div id="overview-fusion" class="kv"></div>
             </div>
             <div class="card">
-              <div class="card-title">角色快照</div>
-              <div id="overview-roles" class="kv"></div>
+              <div class="card-title">Agent 概览</div>
+              <div id="overview-agents" class="kv"></div>
             </div>
           </div>
           <div class="card">
@@ -351,6 +384,7 @@
           </div>
         </section>
       </main>
+    </div>
     </div>
 
     <div id="toast" class="toast hidden"></div>

@@ -11,6 +11,21 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # Pinned to the locally cached version; serde_json only requires ^2.2.
 indexmap = "=2.11.4"
 
+# Native window + WebView2 host. The page still comes from the loopback server;
+# this only replaces the Edge app frame so the caption is ours.
+webview2-com = "0.38.2"
+windows = { version = "0.61.3", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Dwm",
+  "Win32_Graphics_Gdi",
+  "Win32_System_Com",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Threading",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
 [profile.release]
 opt-level = "s"
 lto = true

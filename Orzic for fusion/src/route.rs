@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -140,6 +141,54 @@ fn plan_ready(cwd: &str) -> bool {
     fs::read_to_string(PathBuf::from(cwd).join("PLAN.md"))
         .map(|text| !text.trim().is_empty())
         .unwrap_or(false)
+}
+
+/// `.omp/handoff.md` is the project snapshot written by `/gogo` and loaded by
+/// OMP through `AGENTS.md`.
+fn handoff_ready(cwd: &str) -> bool {
+    if cwd.trim().is_empty() {
+        return false;
+    }
+    PathBuf::from(cwd).join(".omp").join("handoff.md").is_file()
+}
+
+/// A fresh session asking to continue from the snapshot. The snapshot already
+/// carries the plan, so this resumes on the executor instead of spending
+/// another round planning.
+///
+/// Session references ("上一个会话") are unambiguous on their own. Snapshot
+/// references are not: "修改项目快照的生成格式" is a development request, so a
+/// snapshot mention only counts together with a resume verb and without an
+/// edit intent.
+fn handoff_continuation(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    let trimmed = lower.trim_start();
+    if trimmed.starts_with("接着规划") {
+        return false;
+    }
+    if ["上一个会话", "上次会话", "前面的会话"]
+        .iter()
+        .any(|key| lower.contains(key))
+    {
+        return true;
+    }
+    let resumes = ["接着", "继续", "往下做", "往下走"]
+        .iter()
+        .any(|verb| lower.contains(verb))
+        || trimmed.starts_with("读项目快照");
+    if !resumes {
+        return false;
+    }
+    if !["项目快照", "接续快照", "交接快照"]
+        .iter()
+        .any(|key| lower.contains(key))
+    {
+        return trimmed.starts_with("接着");
+    }
+    let edits = [
+        "修改", "改成", "改一下", "加一个", "增加", "实现", "重构", "删除", "调整", "优化",
+    ];
+    !edits.iter().any(|verb| lower.contains(verb))
 }
 
 #[derive(Debug, Clone)]
@@ -453,6 +502,10 @@ fn is_question(text: &str, lower: &str) -> bool {
     {
         return true;
     }
+    // "执行失败怎么办" asks about the run rather than asking for one.
+    if lower.contains("怎么办") {
+        return true;
+    }
     [
         "为什么",
         "为啥",
@@ -516,6 +569,17 @@ pub fn classify(
     if phrase_hit(text, &lower, &rules.execute_phrases)
         || (rules.use_builtin && contains_any(text, &lower, EXECUTE))
     {
+        if current == Some("plan") && !plan_ready {
+            return decide_plan("plan-not-ready", "执行意图已识别，但 PLAN.md 尚未写入");
+        }
+        return decide_execute("execute-intent", "检测到继续执行的意图");
+    }
+
+    // A bare 执行 is too short for the phrase table but carries the same
+    // intent: "那你执行。我要拿结果" must not become a new wish just because
+    // it also says 我要. Questions stay on the question path below, and
+    // negation (不要执行 / 别执行) is already rejected by `contains_any`.
+    if rules.use_builtin && !is_question(text, &lower) && contains_any(text, &lower, &["执行"]) {
         if current == Some("plan") && !plan_ready {
             return decide_plan("plan-not-ready", "执行意图已识别，但 PLAN.md 尚未写入");
         }
@@ -618,7 +682,7 @@ pub fn latest_cwd() -> Option<String> {
 }
 
 /// Entry point for both the CLI (`orzic-fusion route`) and MCP (`fusion_route`).
-/// `event`: `refresh` | `plan-written` | `rework` | `reset`.
+/// `event`: `refresh` | `plan-written` | `handoff` | `rework` | `reset`.
 pub fn route(
     message: &str,
     session: &str,
@@ -674,6 +738,20 @@ pub fn route(
             let decision = decide_execute("plan-written", "PLAN.md 已写入，切换到执行");
             return Ok(build_decision(&state, &decision, true, session));
         }
+        Some("handoff") => {
+            state.sessions.insert(
+                session.to_string(),
+                SessionState {
+                    mode: "execute".into(),
+                    updated_at: now_ms(),
+                    source: "handoff".into(),
+                    cwd: cwd_value.clone(),
+                },
+            );
+            save_state(&state)?;
+            let decision = decide_execute("handoff", "保存交接快照，使用执行模型");
+            return Ok(build_decision(&state, &decision, true, session));
+        }
         Some("rework") => {
             state.sessions.insert(
                 session.to_string(),
@@ -702,7 +780,11 @@ pub fn route(
 
     let ready = plan_ready(cwd);
     let current = state.sessions.get(session).map(|s| s.mode.clone());
-    let decision = classify(message, current.as_deref(), ready, &state.rules);
+    let decision = if handoff_ready(cwd) && handoff_continuation(message) {
+        decide_execute("handoff-continuation", "按项目快照继续上一个会话")
+    } else {
+        classify(message, current.as_deref(), ready, &state.rules)
+    };
     state.sessions.insert(
         session.to_string(),
         SessionState {
@@ -719,6 +801,93 @@ pub fn route(
 // ── OMP extension install ───────────────────────────────────────────────────
 
 const EXTENSION_SOURCE: &str = include_str!("../extensions/fusion-loop.ts");
+
+/// The console only sees a normal exit from OMP. To restart OMP inside the same
+/// terminal, `omp` has to resolve to a launcher that outlives the old process:
+/// `omp.cmd` runs `omp-main.ps1`, which runs the real omp in the foreground and
+/// consumes `.omp/gogo-restart.json` left by `/gogo`.
+fn user_path_raw() -> Option<String> {
+    let out = Command::new("reg")
+        .args(["query", "HKCU\\Environment", "/v", "Path"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("Path") else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        for kind in ["REG_EXPAND_SZ", "REG_SZ"] {
+            if let Some(value) = rest.strip_prefix(kind) {
+                return Some(value.trim_start().to_string());
+            }
+        }
+    }
+    None
+}
+
+pub fn omp_shim_dir() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .map(|local| local.join("OrzicFusion").join("bin"))
+}
+
+/// `omp` must resolve to a launcher that outlives the old process: it runs the
+/// real omp in this console and consumes `.omp/gogo-restart.json` after a
+/// confirmed `/gogo` save. The launcher is a native exe, so arguments are
+/// forwarded verbatim (a cmd/PowerShell wrapper strips quotes from JSON values).
+pub fn install_omp_shim() -> Result<PathBuf, String> {
+    let dir = omp_shim_dir().ok_or_else(|| "未找到 LOCALAPPDATA".to_string())?;
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("无法创建 {}: {e}", dir.display()))?;
+
+    let launcher = std::env::current_exe()
+        .map_err(|e| format!("无法定位当前程序: {e}"))?
+        .parent()
+        .map(|parent| parent.join("omp-launcher.exe"))
+        .filter(|path| path.is_file())
+        .ok_or_else(|| "找不到 omp-launcher.exe（应与 orzic-fusion.exe 同目录）".to_string())?;
+    fs::copy(&launcher, dir.join("omp.exe"))
+        .map_err(|e| format!("无法安装 omp 入口: {e}"))?;
+    for legacy in ["omp.cmd", "omp-main.ps1"] {
+        let _ = fs::remove_file(dir.join(legacy));
+    }
+
+    let target = dir.to_string_lossy().to_string();
+    let current = user_path_raw().unwrap_or_default();
+    let present = current
+        .split(';')
+        .any(|entry| entry.trim().eq_ignore_ascii_case(&target));
+    if !present {
+        let next = if current.trim().is_empty() {
+            target.clone()
+        } else {
+            format!("{target};{current}")
+        };
+        let status = Command::new("reg")
+            .args([
+                "add",
+                "HKCU\\Environment",
+                "/v",
+                "Path",
+                "/t",
+                "REG_EXPAND_SZ",
+                "/d",
+                &next,
+                "/f",
+            ])
+            .status()
+            .map_err(|e| format!("无法写入用户 PATH: {e}"))?;
+        if !status.success() {
+            return Err("无法写入用户 PATH".to_string());
+        }
+    }
+    Ok(dir)
+}
 
 pub fn install_extension() -> Result<Value, String> {
     let dir = omp_agent_dir().join("extensions");
@@ -760,11 +929,14 @@ pub fn install_extension() -> Result<Value, String> {
     let _ = refresh_roles(&mut state);
     let _ = save_state(&state);
 
+    let shim = install_omp_shim().map_err(|e| format!("扩展已登记，但 omp 入口安装失败：{e}"))?;
+
     Ok(json!({
         "installed": true,
         "registered": true,
         "extension": target,
         "exe": exe,
+        "shim": shim.to_string_lossy(),
         "routeState": state_path().to_string_lossy(),
     }))
 }
@@ -825,6 +997,37 @@ mod tests {
     }
 
     #[test]
+    fn bare_execute_after_planning_starts_the_run() {
+        let decision = classify("那你执行。我要拿结果", Some("plan"), true, &rules());
+        assert_eq!(decision.mode, "execute");
+        assert_eq!(decision.source, "execute-intent");
+    }
+
+    #[test]
+    fn bare_execute_question_stays_on_the_planner() {
+        for text in ["这个怎么执行？", "什么时候执行", "执行失败怎么办"] {
+            let decision = classify(text, Some("plan"), true, &rules());
+            assert_eq!(decision.mode, "plan", "{text}");
+            assert_eq!(decision.source, "sticky-question", "{text}");
+        }
+    }
+
+    #[test]
+    fn execute_word_with_new_wish_still_plans() {
+        let decision = classify("开始执行吧，另外加一个性能优化", Some("plan"), true, &rules());
+        assert_eq!(decision.mode, "plan");
+        assert_eq!(decision.source, "new-wish");
+    }
+
+    #[test]
+    fn negated_execute_stays_on_the_planner() {
+        for text in ["不要执行", "别执行了"] {
+            let decision = classify(text, Some("plan"), true, &rules());
+            assert_eq!(decision.mode, "plan", "{text}");
+        }
+    }
+
+    #[test]
     fn continuation_without_plan_does_not_escape_planning() {
         let decision = classify("继续执行", Some("plan"), false, &rules());
         assert_eq!(decision.mode, "plan");
@@ -869,5 +1072,25 @@ mod tests {
         let decision = classify("嗯，这个方向可以", Some("execute"), true, &rules());
         assert_eq!(decision.mode, "execute");
         assert_eq!(decision.source, "sticky");
+    }
+
+    #[test]
+    fn handoff_continuation_recognises_resume_phrases() {
+        assert!(handoff_continuation("接着上一个会话继续"));
+        assert!(handoff_continuation("读项目快照，接着往下做"));
+        assert!(handoff_continuation("看前面的会话记录，接着做"));
+        assert!(handoff_continuation("读项目快照"));
+        assert!(handoff_continuation("接着做"));
+        assert!(!handoff_continuation("接着规划一下导出功能"));
+        assert!(!handoff_continuation("把 export 命令实现一下"));
+    }
+
+    #[test]
+    fn handoff_continuation_rejects_snapshot_development_requests() {
+        assert!(!handoff_continuation("修改项目快照的生成格式"));
+        assert!(!handoff_continuation("给接续快照加一个字段"));
+        assert!(!handoff_continuation("继续修改项目快照的生成格式"));
+        assert!(!handoff_continuation("读项目快照的生成实现"));
+        assert!(!handoff_continuation("优化交接快照的排版"));
     }
 }

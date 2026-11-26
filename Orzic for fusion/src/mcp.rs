@@ -1,6 +1,7 @@
 use crate::acceptance;
 use crate::agents::omp;
 use crate::connectors::{self, CustomTarget, SERVER_NAME};
+use crate::handoff;
 use crate::route;
 use crate::state;
 use serde_json::{json, Map, Value};
@@ -138,6 +139,30 @@ fn tools_schema() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "fusion_handoff_read",
+            "description": "Read the project's portable handoff snapshot (.omp/handoff.md). A fresh session on this or another machine can resume from it; AGENTS.md imports it at session start.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cwd": { "type": "string", "description": "Workspace root that contains the .omp directory." }
+                },
+                "required": ["cwd"]
+            }
+        },
+        {
+            "name": "fusion_handoff_save",
+            "description": "Create or replace the project's portable handoff snapshot so a later session — or another checkout — can continue. Records confirmed goals, decisions and reasons, verified results, open items, and next steps. Also appends an @.omp/handoff.md import to AGENTS.md when missing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cwd": { "type": "string", "description": "Workspace root that contains the .omp directory." },
+                    "content": { "type": "string", "description": "Markdown snapshot to store (max 64 KiB)." },
+                    "expectedHash": { "type": "string", "description": "Hash returned by fusion_handoff_read; when given, the save fails if the file changed in between." }
+                },
+                "required": ["cwd", "content"]
+            }
+        },
+        {
             "name": "fusion_accept",
             "description": "Run one manual acceptance pass: collect the git diff and PLAN.md, call the review role model, and return PASS/REWORK with findings.",
             "inputSchema": {
@@ -242,6 +267,19 @@ fn call_tool(name: &str, args: &Map<String, Value>) -> Result<Value, String> {
             let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or("");
             let event = args.get("event").and_then(Value::as_str);
             route::route(message, session, cwd, event)
+        }
+        "fusion_handoff_read" => {
+            let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or("");
+            handoff::read(cwd)
+        }
+        "fusion_handoff_save" => {
+            let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or("");
+            let content = args
+                .get("content")
+                .and_then(Value::as_str)
+                .ok_or("缺少 content")?;
+            let expected = args.get("expectedHash").and_then(Value::as_str);
+            handoff::save(cwd, content, expected)
         }
         "fusion_install_omp" => route::install_extension(),
         "fusion_accept" => {

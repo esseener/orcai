@@ -7,7 +7,8 @@
 // written; a successful non-empty PLAN.md hands off to the executor.
 import { execFile, execFileSync } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
-import { readFileSync, unlinkSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -20,8 +21,39 @@ const PLAN_PROMPT = [
   '写入成功后会自动切换到执行模型。本轮不要修改其他文件，不要运行 bash/eval，也不要委派 task 子任务。',
 ].join('\n')
 
+const CONTINUE_MESSAGE = '接着上一个会话继续'
+// A save turn on a large session can take minutes; never block the panel forever.
+const HANDOFF_WAIT_MS = 10 * 60_000
+
+// MCP tools may be mounted as bash commands, so the tool name is not a stable
+// signal. The snapshot itself is: an empty result means no file, and an
+// unchanged hash means the save did not land.
+function handoffStamp(cwd: string): string {
+  try {
+    return createHash('sha1')
+      .update(readFileSync(join(cwd, '.omp', 'handoff.md'), 'utf8'))
+      .digest('hex')
+  } catch {
+    return ''
+  }
+}
+
 const REWORK_MARKER = '[Orzic Fusion 自动返工]'
 const MAX_REWORK_ROUNDS = 2
+
+// `/gogo` injects this as a normal user message so the model writes the
+// snapshot with the tools it already has. The marker lets the routing hook
+// recognise the turn: it must run on the executor, never the planner.
+const HANDOFF_MARKER = '[Orzic Fusion 交接保存]'
+const HANDOFF_PROMPT = [
+  `${HANDOFF_MARKER} 用户要求把当前会话保存到项目接续快照，之后会退出并用新会话接着做。`,
+  '只做这一件事，不要继续原任务，不要修改其他文件。',
+  '1. 调用 fusion_handoff_read（cwd 为当前项目根）读取现有快照与 hash；工具不可用时直接读 .omp/handoff.md。',
+  '2. 按本次对话的真实内容写一份简体中文 Markdown：目标、已完成（只写实际做过并验证过的）、关键决定及原因、未完成事项、下一步（带具体文件与仓库相对路径，不要写绝对路径）、重要验证结果。不要编造，不要粘贴整段聊天。',
+  '3. 调用 fusion_handoff_save 保存：传 cwd、content，以及第 1 步读到的 hash 作为 expectedHash（此前没有快照则省略）。工具不可用时用 write 写入 .omp/handoff.md，并确保 AGENTS.md 含 `@.omp/handoff.md` 导入行。',
+  '4. 读回确认：hash 与 bytes 与写入一致，agentsWired 为 true。',
+  '5. 用一句话告诉用户：已保存到 .omp/handoff.md。若自动接续没有生效，再提示按 Ctrl+D 退出，并在同一目录重新运行 omp，说「接着上一个会话继续」。',
+].join('\n')
 
 type AutoFinding = {
   severity?: string
@@ -74,10 +106,19 @@ type PiContext = {
   abort?(): void
   modelRegistry?: { getAvailable?(): PiModel[] }
   sessionManager?: { getSessionId?(): unknown; getSessionFile?(): unknown }
+  isIdle?(): boolean
+  hasPendingMessages?(): boolean
+  shutdown?(): void
 }
+
+type PiCommandContext = PiContext
 
 type Pi = {
   on(name: string, fn: (event: PiEvent, ctx: PiContext) => unknown | Promise<unknown>): void
+  registerCommand?(name: string, options: {
+    description?: string
+    handler: (args: string, ctx: PiCommandContext) => Promise<void> | void
+  }): void
   setModel?(model: PiModel): unknown
   setThinkingLevel?(level: string): unknown
   sendUserMessage?(content: string, options?: { deliverAs?: string; attribution?: string }): unknown
@@ -110,6 +151,70 @@ function sessionId(ctx: PiContext): string {
     if (file) return String(file)
   } catch { /* fall through */ }
   return 'default'
+}
+
+// Memory watch talks to `orzic-fusion mem-report`; it never writes the state
+// file itself, so the console and the extension stay on one writer.
+const MEMORY_INTERVAL_MS = 5000
+let memoryTimer: NodeJS.Timeout | null = null
+let memorySession = ''
+
+function memoryLabel(ctx: PiContext): string {
+  const id = sessionId(ctx)
+  // `default` is the routing fallback, not a real session key.
+  return id === 'default' ? `pid:${process.pid}` : id
+}
+
+function formatBytes(value: number): string {
+  if (!value) return '0 MB'
+  const gb = value / 1024 ** 3
+  if (gb >= 1) return `${gb.toFixed(2)} GB`
+  return `${Math.round(value / 1024 ** 2)} MB`
+}
+
+function reportMemory(ctx: PiContext, label: string): void {
+  const usage = typeof process.memoryUsage === 'function' ? process.memoryUsage() : null
+  const rss = usage?.rss ?? 0
+  if (!rss) return
+  try {
+    const out = execFileSync(EXE, ['mem-report'], {
+      input: JSON.stringify({
+        agent: 'omp',
+        sessionId: label,
+        pid: process.pid,
+        rssBytes: rss,
+        cwd: ctx.cwd ?? process.cwd(),
+        scope: 'process',
+        note: 'OMP 主进程常驻内存；同一进程内的会话共享',
+      }),
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 5000,
+    })
+    const result = JSON.parse(out) as { alert?: boolean; thresholdBytes?: number }
+    if (result.alert) {
+      ctx.ui?.notify?.(
+        `Orzic Fusion：本会话进程内存 ${formatBytes(rss)}，超过 ${formatBytes(result.thresholdBytes ?? 0)} 预警线。` +
+          '先整理进度再开新对话（/new，旧会话保留）；新对话不保证释放进程内存。',
+        'warning',
+      )
+    }
+  } catch { /* sampling must never break a turn */ }
+}
+
+function startMemoryWatch(ctx: PiContext, label: string): void {
+  if (memorySession === label && memoryTimer) {
+    reportMemory(ctx, label)
+    return
+  }
+  if (memoryTimer) {
+    clearInterval(memoryTimer)
+    memoryTimer = null
+  }
+  memorySession = label
+  reportMemory(ctx, label)
+  memoryTimer = setInterval(() => reportMemory(ctx, label), MEMORY_INTERVAL_MS)
+  memoryTimer.unref?.()
 }
 
 function asDecision(value: unknown): RouteDecision {
@@ -171,12 +276,41 @@ async function useModel(pi: Pi, ctx: PiContext, decision: RouteDecision): Promis
   return true
 }
 
+// The native launcher (`bin/omp-launcher.exe`) runs `omp` in the foreground of
+// the same terminal. The marker carries its per-run token, so only the run
+// that asked to be replaced is relaunched, in that project, once.
+function armRelaunch(cwd: string, session: string): boolean {
+  const dir = join(cwd, '.omp')
+  const target = join(dir, 'gogo-restart.json')
+  try {
+    mkdirSync(dir, { recursive: true })
+    const tmp = `${target}.${process.pid}.tmp`
+    writeFileSync(
+      tmp,
+      JSON.stringify({
+        run: process.env.ORZIC_OMP_RUN ?? '',
+        pid: process.pid,
+        cwd,
+        session,
+        message: CONTINUE_MESSAGE,
+        at: Date.now(),
+      }),
+    )
+    renameSync(tmp, target)
+    return true
+  } catch {
+    return false
+  }
+}
+
 export default function (pi: Pi): void {
   const phases = new Map<string, string>()
   const pendingPlanWrites = new Map<string, string>()
   const turnTokens = new Map<string, number>()
   const reworkCounts = new Map<string, number>()
   const autoRuns = new Map<string, ActiveRun>()
+  // A handoff turn is an explicit save request: it must not be auto-reviewed.
+  const handoffTurns = new Set<string>()
   const mainOnly = (ctx: PiContext) => ctx.agent?.kind !== 'sub'
 
   const cancelAutoRun = (id: string) => {
@@ -322,6 +456,7 @@ export default function (pi: Pi): void {
     try {
       callRoute(['--event', 'refresh', '--session', id], '')
     } catch { /* the first turn will retry */ }
+    startMemoryWatch(ctx, memoryLabel(ctx))
   })
 
   pi.on('before_agent_start', async (event: PiEvent, ctx: PiContext) => {
@@ -332,6 +467,7 @@ export default function (pi: Pi): void {
 
     turnTokens.set(id, (turnTokens.get(id) ?? 0) + 1)
     const isRework = event.prompt.startsWith(REWORK_MARKER)
+    const isHandoff = event.prompt.startsWith(HANDOFF_MARKER)
     if (!isRework) {
       reworkCounts.set(id, 0)
       cancelAutoRun(id)
@@ -348,17 +484,45 @@ export default function (pi: Pi): void {
       }
       if (decision.error) {
         ctx.ui?.notify?.(`Orzic Fusion：${decision.error}`, 'warning')
-        ctx.abort?.()
+        phases.set(id, 'execute')
         return
       }
       const ok = await useModel(pi, ctx, decision)
-      if (!ok) {
-        ctx.ui?.notify?.(`Orzic Fusion：返工模型不可用 ${decision.selector ?? ''}`, 'warning')
-        ctx.abort?.()
+      phases.set(id, 'execute')
+      ctx.ui?.notify?.(
+        ok
+          ? 'Orzic Fusion：自动返工，保持执行模型'
+          : `Orzic Fusion：返工模型不可用 ${decision.selector ?? ''}，沿用当前模型`,
+        ok ? 'info' : 'warning',
+      )
+      return
+    }
+
+    if (isHandoff) {
+      // Explicit user command: run on the executor and never inject the plan
+      // prompt, even when the session was still planning.
+      handoffTurns.add(id)
+      let decision: RouteDecision
+      try {
+        decision = callRoute(['--event', 'handoff', '--session', id, '--cwd', cwd], '')
+      } catch (error) {
+        ctx.ui?.notify?.(`Orzic Fusion 交接路由失败：${error instanceof Error ? error.message : String(error)}`, 'warning')
+        phases.set(id, 'execute')
         return
       }
+      if (decision.error) {
+        ctx.ui?.notify?.(`Orzic Fusion：${decision.error}`, 'warning')
+        phases.set(id, 'execute')
+        return
+      }
+      const ok = await useModel(pi, ctx, decision)
       phases.set(id, 'execute')
-      ctx.ui?.notify?.('Orzic Fusion：自动返工，保持执行模型', 'info')
+      ctx.ui?.notify?.(
+        ok
+          ? `Orzic Fusion：交接保存，执行模型 ${decision.selector ?? ''}`
+          : 'Orzic Fusion：交接保存，执行模型不可用，沿用当前模型',
+        ok ? 'info' : 'warning',
+      )
       return
     }
 
@@ -371,15 +535,12 @@ export default function (pi: Pi): void {
     }
     if (decision.error) {
       ctx.ui?.notify?.(`Orzic Fusion：${decision.error}`, 'warning')
-      ctx.abort?.()
       return
     }
 
     const ok = await useModel(pi, ctx, decision)
     if (!ok) {
-      ctx.ui?.notify?.(`Orzic Fusion：模型不可用 ${decision.selector ?? ''}`, 'warning')
-      ctx.abort?.()
-      return
+      ctx.ui?.notify?.(`Orzic Fusion：模型不可用 ${decision.selector ?? ''}，沿用当前模型`, 'warning')
     }
     phases.set(id, decision.mode ?? 'plan')
 
@@ -403,6 +564,9 @@ export default function (pi: Pi): void {
     const id = sessionId(ctx)
     if (phases.get(id) !== 'plan') return
     const name = event.toolName ?? ''
+    // The handoff tools are the explicit save path (`/gogo`), not a task
+    // side effect: they stay available even while planning.
+    if (name === 'fusion_handoff_read' || name === 'fusion_handoff_save') return
     const input = event.input ?? {}
     const target = typeof input.path === 'string'
       ? input.path
@@ -471,12 +635,126 @@ export default function (pi: Pi): void {
 
   pi.on('agent_end', (event: PiEvent, ctx: PiContext) => {
     if (!mainOnly(ctx)) return
-    if (event.willContinue === true || event.awaitingAsyncWork === true) return
     const id = sessionId(ctx)
+    if (event.willContinue === true || event.awaitingAsyncWork === true) return
+    // A handoff save must not spend another model turn on acceptance.
+    if (handoffTurns.delete(id)) return
     if (phases.get(id) !== 'execute') return
     if (autoRuns.has(id)) return
     const cwd = ctx.cwd ?? process.cwd()
     const token = turnTokens.get(id) ?? 0
     void autoReview(ctx, id, cwd, token)
+  })
+
+  // Command handlers are killed after 30s (EXTENSION_HANDLER_TIMEOUT_MS), so
+  // the save turn is watched from a timer instead of from the handler itself.
+  let gogoWatch: { timer: NodeJS.Timeout } | null = null
+  const cancelGogoWatch = () => {
+    if (!gogoWatch) return
+    clearInterval(gogoWatch.timer)
+    gogoWatch = null
+  }
+  const watchHandoffSave = (
+    ctx: PiCommandContext,
+    cwd: string,
+    session: string,
+    before: string,
+  ) => {
+    cancelGogoWatch()
+    const deadline = Date.now() + HANDOFF_WAIT_MS
+    let last = before
+    const timer = setInterval(() => {
+      if (Date.now() > deadline) {
+        cancelGogoWatch()
+        ctx.ui?.notify?.(
+          'Orzic Fusion：未在时限内完成快照保存与会话收尾，已留在当前会话；可重试 /gogo。',
+          'warning',
+        )
+        return
+      }
+      const now = handoffStamp(cwd)
+      if (now === '' || now === before) return
+      // The model rewrites the snapshot while verifying it; only take over once
+      // the file has stopped changing.
+      if (now !== last) {
+        last = now
+        return
+      }
+      if (typeof ctx.isIdle !== 'function' || typeof ctx.hasPendingMessages !== 'function') {
+        cancelGogoWatch()
+        ctx.ui?.notify?.(
+          'Orzic Fusion：快照已保存，但无法确认会话空闲；请按 Ctrl+D 后重新运行 omp，说「接着上一个会话继续」。',
+          'warning',
+        )
+        return
+      }
+      if (!ctx.isIdle() || ctx.hasPendingMessages()) return
+      cancelGogoWatch()
+      // Only the launcher knows how to start the next omp in this console.
+      // Without it, exiting would just drop the user at a shell prompt.
+      if (!process.env.ORZIC_OMP_RUN) {
+        ctx.ui?.notify?.(
+          'Orzic Fusion：快照已保存。当前 OMP 不是从 omp 入口启动的，无法自动重启；请按 Ctrl+D 后在同一个终端重新运行 omp，说「接着上一个会话继续」。',
+          'warning',
+        )
+        return
+      }
+      if (typeof ctx.shutdown !== 'function') {
+        ctx.ui?.notify?.(
+          'Orzic Fusion：进度已保存，但当前 OMP 不支持自动退出；请按 Ctrl+D 后重新运行 omp，说「接着上一个会话继续」。',
+          'warning',
+        )
+        return
+      }
+      if (!armRelaunch(cwd, session)) {
+        ctx.ui?.notify?.(
+          'Orzic Fusion：进度已保存，但无法写入重启标记（.omp/gogo-restart.json）；请按 Ctrl+D 后重新运行 omp。',
+          'warning',
+        )
+        return
+      }
+      ctx.ui?.notify?.('Orzic Fusion：快照已保存，正在同一个窗口重启 OMP…', 'info')
+      ctx.shutdown()
+    }, 1500)
+    timer.unref?.()
+    gogoWatch = { timer }
+  }
+
+  // `/gogo`: save the current progress, then exit so the native launcher
+  // (`bin/omp-launcher.exe`) can start a brand-new omp in this same terminal.
+  // The marker names the launcher run, so only this run is replaced once.
+  // `/gogo keep` saves without exiting.
+  pi.registerCommand?.('gogo', {
+    description: '保存当前进度并在同一个窗口重启 OMP 接着做；加 keep 只保存',
+    handler: async (args, ctx) => {
+      if (ctx?.agent?.kind === 'sub') return
+      if (typeof pi.sendUserMessage !== 'function') {
+        ctx?.ui?.notify?.('Orzic Fusion：当前 OMP 不支持注入消息，/gogo 无法保存', 'warning')
+        return
+      }
+      const id = sessionId(ctx)
+      const cwd = ctx.cwd ?? process.cwd()
+      const keep = /(^|\s)(keep|只保存|不重启)(\s|$)/i.test(String(args ?? ''))
+      const before = handoffStamp(cwd)
+      ctx?.ui?.notify?.(
+        keep
+          ? 'Orzic Fusion：正在整理本次会话并写入 .omp/handoff.md …'
+          : 'Orzic Fusion：正在保存进度；成功后会在同一个窗口重启 OMP 接续。',
+        'info',
+      )
+      // Do not await this: in the TUI the returned promise settles only after
+      // the queued prompt is consumed, which is the turn we are waiting for.
+      const pending = pi.sendUserMessage(HANDOFF_PROMPT, { deliverAs: 'followUp' })
+      if (pending && typeof (pending as Promise<unknown>).then === 'function') {
+        ;(pending as Promise<unknown>).catch((error) => {
+          ctx?.ui?.notify?.(
+            `Orzic Fusion：保存请求未能进入会话：${error instanceof Error ? error.message : String(error)}`,
+            'warning',
+          )
+        })
+      }
+      if (keep) return
+      watchHandoffSave(ctx, cwd, id, before)
+    },
   })
 }

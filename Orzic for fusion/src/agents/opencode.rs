@@ -190,8 +190,34 @@ fn run_plain(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+const PROBE_TTL: Duration = Duration::from_secs(60);
+
+static VERSION_CACHE: Mutex<Option<(Instant, String)>> = Mutex::new(None);
+
+pub fn invalidate_probe_cache() {
+    if let Ok(mut slot) = VERSION_CACHE.lock() {
+        *slot = None;
+    }
+}
+
+/// `opencode --version` costs a process spawn (~150 ms) on every Agent detail
+/// load. It only changes on upgrade, so keep it for a minute; the refresh
+/// button (`force`) clears it first.
 pub fn version() -> Result<String, String> {
-    run_plain(&["--version"], None).map(|text| text.trim().to_string())
+    if let Ok(slot) = VERSION_CACHE.lock() {
+        if let Some((at, text)) = slot.as_ref() {
+            if at.elapsed() < PROBE_TTL {
+                return Ok(text.clone());
+            }
+        }
+    }
+    let text = run_plain(&["--version"], None)?
+        .trim()
+        .to_string();
+    if let Ok(mut slot) = VERSION_CACHE.lock() {
+        *slot = Some((Instant::now(), text.clone()));
+    }
+    Ok(text)
 }
 
 fn now_ms() -> u64 {
@@ -569,6 +595,7 @@ fn run_agent(
     model: &str,
     prompt: &str,
     standalone: bool,
+    phase: &str,
 ) -> Result<Value, String> {
     let exe = find_executable();
     let mut cmd = command();
@@ -597,6 +624,16 @@ fn run_agent(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("无法运行 OpenCode ({exe}): {e}"))?;
+    let _memory = crate::memory::Track::start(
+        "opencode",
+        session_id.to_string(),
+        child.id(),
+        cwd.display().to_string(),
+        phase,
+        "",
+        "run",
+        "本次 OpenCode 运行进程的内存；退出后不再上报",
+    );
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(prompt.as_bytes())
@@ -686,6 +723,9 @@ fn execute_prompt() -> &'static str {
 }
 
 pub fn status(cwd: &str, force_models: bool) -> Value {
+    if force_models {
+        invalidate_probe_cache();
+    }
     let key = normalize_cwd(cwd);
     let models_result = models(force_models);
     let (models, model_error) = match models_result {
@@ -834,6 +874,7 @@ pub fn session_action(body: &Map<String, Value>) -> Result<Value, String> {
                 &model,
                 &plan_prompt(&task),
                 false,
+                "规划",
             )?;
             let mut state = load_state();
             state.sessions.insert(
@@ -876,6 +917,7 @@ pub fn session_action(body: &Map<String, Value>) -> Result<Value, String> {
                 &model,
                 execute_prompt(),
                 false,
+                "执行",
             )?;
             session.phase = "executed".to_string();
             session.execution = run["text"].as_str().unwrap_or("").to_string();
@@ -917,6 +959,7 @@ pub fn session_action(body: &Map<String, Value>) -> Result<Value, String> {
                 &model,
                 &acceptance::build_review_prompt(&plan, &diff),
                 true,
+                "验收",
             )?;
             let parsed = acceptance::parse_review_text(run["text"].as_str().unwrap_or(""))?;
             let result = json!({

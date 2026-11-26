@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 pub const SERVER_NAME: &str = "fusion";
 
@@ -47,6 +49,17 @@ pub const FORMAT_MCP_SERVERS: &str = "mcpServers";
 pub const FORMAT_OPENCODE: &str = "opencode";
 pub const FORMAT_CODEX: &str = "codex";
 
+/// Capabilities Fusion actually manages for a target. Empty means the target
+/// only gets MCP registration; the UI must not invent model or session forms.
+pub fn capabilities_for(id: &str) -> &'static [&'static str] {
+    match id {
+        "omp" => &["角色模型", "路由开关", "每轮路由", "验收"],
+        "opencode" => &["角色模型", "受控会话", "验收"],
+        "codex" => &["角色模型", "受控会话", "验收"],
+        _ => &[],
+    }
+}
+
 /// OMP and the desktop/CLI targets use `mcpServers`; OpenCode v2 normalizes
 /// its legacy flat `mcp` map to `mcp.servers`, so it needs its own writer.
 pub fn builtin_targets() -> Vec<BuiltinTarget> {
@@ -56,7 +69,7 @@ pub fn builtin_targets() -> Vec<BuiltinTarget> {
         BuiltinTarget {
             id: "omp",
             label: "OMP (oh-my-pi)",
-            kind: "Agent CLI · 首选",
+            kind: "Agent CLI",
             path: omp_mcp_file(),
             format: FORMAT_MCP_SERVERS,
         },
@@ -138,6 +151,7 @@ pub fn save_custom_target(target: CustomTarget) -> Result<Vec<CustomTarget>, Str
         &serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?,
         None,
     )?;
+    invalidate_cache();
     Ok(list)
 }
 
@@ -149,6 +163,7 @@ pub fn remove_custom_target(id: &str) -> Result<Vec<CustomTarget>, String> {
         &serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?,
         None,
     )?;
+    invalidate_cache();
     Ok(list)
 }
 
@@ -562,6 +577,7 @@ pub fn connect_to_path(
 }
 
 pub fn connect_target_by_id(id: &str, enable: bool) -> Result<Value, String> {
+    invalidate_cache();
     let exe = current_exe_string();
     if let Some(def) = builtin_targets().into_iter().find(|t| t.id == id) {
         if def.format == FORMAT_OPENCODE {
@@ -585,7 +601,35 @@ pub fn connect_target_by_id(id: &str, enable: bool) -> Result<Value, String> {
     Err(format!("未知的目标平台 ID：{id}"))
 }
 
+const LIST_TTL: Duration = Duration::from_secs(10);
+
+static LIST_CACHE: Mutex<Option<(Instant, Value)>> = Mutex::new(None);
+
+pub fn invalidate_cache() {
+    if let Ok(mut slot) = LIST_CACHE.lock() {
+        *slot = None;
+    }
+}
+
+/// Inspect every target's config file. Callers sit on the Agent list, both
+/// Agent detail pages and every save response, so the result is reused for a
+/// short window; connect/unregister paths invalidate it explicitly.
 pub fn list_all() -> Value {
+    if let Ok(slot) = LIST_CACHE.lock() {
+        if let Some((at, value)) = slot.as_ref() {
+            if at.elapsed() < LIST_TTL {
+                return value.clone();
+            }
+        }
+    }
+    let value = list_all_uncached();
+    if let Ok(mut slot) = LIST_CACHE.lock() {
+        *slot = Some((Instant::now(), value.clone()));
+    }
+    value
+}
+
+fn list_all_uncached() -> Value {
     let exe = current_exe_string();
     let mut targets = Vec::new();
     for def in builtin_targets() {
@@ -596,6 +640,8 @@ pub fn list_all() -> Value {
             "label": def.label,
             "kind": def.kind,
             "format": def.format,
+            "adapter": !capabilities_for(def.id).is_empty(),
+            "capabilities": capabilities_for(def.id),
             "custom": false,
             "serverName": SERVER_NAME,
             "configPath": def.path.to_string_lossy(),
@@ -613,6 +659,8 @@ pub fn list_all() -> Value {
             "label": custom.label,
             "kind": "自定义桌面软件",
             "format": FORMAT_MCP_SERVERS,
+            "adapter": false,
+            "capabilities": [],
             "custom": true,
             "serverName": custom.server_name,
             "configPath": custom.config_path,

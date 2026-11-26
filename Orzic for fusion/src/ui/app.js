@@ -17,8 +17,13 @@ const esc = (value) =>
   }[ch]));
 
 let app = { omp: null, models: [], connectors: null };
+let catalog = { fusion: null, connectors: null };
+let memoryState = { thresholdBytes: 0, resetBytes: 0, samples: [] };
+let currentAgent = '';
 let draft = null;
 let baseline = '';
+let draftTouched = false;
+let ompPrefetch = null;
 let activeSnip = 'mcpServers';
 let lastSavedAt = '';
 let reviewCwd = localStorage.getItem('fusionReviewCwd') || '';
@@ -92,23 +97,113 @@ function costLabel(model) {
   return `输入 $${formatCost(model.costInput)} / 输出 $${formatCost(model.costOutput)} / 1M`;
 }
 
-// ── Tabs ────────────────────────────────────────────────────────────────────
+// ── Navigation ─────────────────────────────────────────────────────────────
 
-$('tabs').addEventListener('click', (event) => {
-  const tab = event.target.closest('.tab');
-  if (!tab) return;
-  document.querySelectorAll('.tab').forEach((el) => {
-    const active = el === tab;
+const DETAIL_PANELS = { omp: 'tab-omp', opencode: 'tab-opencode', codex: 'tab-codex' };
+const DETAIL_SLOTS = { omp: 'omp-mcp', opencode: 'oc-mcp', codex: 'cx-mcp' };
+const MEMORY_SLOTS = { omp: 'omp-memory', opencode: 'oc-memory', codex: 'cx-memory' };
+
+function setNav(tabName) {
+  document.querySelectorAll('#tabs .tab').forEach((el) => {
+    const active = el.dataset.tab === tabName;
     el.classList.toggle('active', active);
     if (active) el.setAttribute('aria-current', 'page');
     else el.removeAttribute('aria-current');
   });
-  document.querySelectorAll('.panel').forEach((el) => el.classList.remove('active'));
-  const panel = $(`tab-${tab.dataset.tab}`);
-  if (panel) panel.classList.add('active');
-  if (tab.dataset.tab === 'opencode' && !oc.status) loadOpenCode(false);
-  if (tab.dataset.tab === 'codex' && !cx.status) loadCodex(false);
+}
+
+function showPanel(id) {
+  document.querySelectorAll('.panel').forEach((el) => {
+    el.classList.toggle('active', el.id === id);
+  });
+}
+
+function showAgentsList(focusId = currentAgent) {
+  currentAgent = '';
+  setNav('agents');
+  showPanel('tab-agents');
+  const row = focusId ? document.querySelector(`[data-agent-view="${focusId}"]`) : null;
+  if (row) row.focus();
+  else $('agents-title').focus();
+}
+
+function openAgent(id) {
+  const target = catalog.connectors?.targets?.find((item) => item.id === id);
+  if (!target) return;
+  currentAgent = id;
+  setNav('agents');
+  const panelId = DETAIL_PANELS[id] || 'tab-agent';
+  showPanel(panelId);
+  if (panelId === 'tab-agent') {
+    $('agent-title').textContent = target.label;
+    $('agent-subtitle').textContent = `${target.kind} · 仅支持 MCP 注册；Fusion 不管理它的角色模型或受控会话。`;
+    renderMcp('agent-mcp', id);
+    renderMemory('agent-memory', id);
+    loadMemory();
+    $('agent-title').focus();
+    return;
+  }
+  renderMcp(DETAIL_SLOTS[id], id);
+  renderMemory(MEMORY_SLOTS[id], id);
+  loadMemory();
+  $(`${id === 'omp' ? 'omp' : id === 'opencode' ? 'oc' : 'cx'}-title`).focus();
+  if (id === 'omp' && !app.omp) loadState();
+  if (id === 'opencode' && !oc.status) loadOpenCode(false);
+  if (id === 'codex' && !cx.status) loadCodex(false);
+}
+
+$('tabs').addEventListener('click', (event) => {
+  const tab = event.target.closest('.tab');
+  if (!tab) return;
+  currentAgent = '';
+  setNav(tab.dataset.tab);
+  showPanel(`tab-${tab.dataset.tab}`);
 });
+
+document.addEventListener('click', (event) => {
+  const windowButton = event.target.closest('[data-window]');
+  if (windowButton) {
+    api('/api/window', { action: windowButton.dataset.window }).catch(() => {});
+    return;
+  }
+  const handoff = event.target.closest('[data-handoff]');
+  if (handoff) {
+    copyHandoff(handoff.dataset.handoff);
+    return;
+  }
+  const view = event.target.closest('[data-agent-view]');
+  if (view) {
+    openAgent(view.dataset.agentView);
+    return;
+  }
+  if (event.target.closest('[data-back]')) {
+    showAgentsList();
+    return;
+  }
+  const toggle = event.target.closest('[data-toggle]');
+  if (toggle) {
+    toggleTarget(toggle.dataset.toggle, toggle.dataset.enable === '1');
+    return;
+  }
+  const remove = event.target.closest('[data-remove]');
+  if (remove) removeCustom(remove.dataset.remove);
+});
+
+// ── Native window chrome ───────────────────────────────────────────────────
+
+const topbar = document.querySelector('.topbar');
+if (topbar) {
+  const interactive = (target) =>
+    target.closest('button, a, input, textarea, select, .pill');
+  topbar.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || interactive(event.target)) return;
+    api('/api/window', { action: 'drag' }).catch(() => {});
+  });
+  topbar.addEventListener('dblclick', (event) => {
+    if (interactive(event.target)) return;
+    api('/api/window', { action: 'maximize' }).catch(() => {});
+  });
+}
 
 // ── Model picker ────────────────────────────────────────────────────────────
 
@@ -118,6 +213,7 @@ document.addEventListener('click', () => {
 
 function setRoleModel(role, selector) {
   const entry = draft.roles[role] || (draft.roles[role] = { model: '', thinking: '' });
+  draftTouched = true;
   entry.model = selector;
   if (!selector) {
     entry.thinking = '';
@@ -269,6 +365,7 @@ function renderThinking(role) {
   node.thinkRow.querySelectorAll('.pill-btn').forEach((button) => {
     button.addEventListener('click', () => {
       entry.thinking = button.dataset.level || '';
+      draftTouched = true;
       renderThinking(role);
       updateDirty();
     });
@@ -569,18 +666,22 @@ function renderFlags() {
 
 $('flag-plan').addEventListener('change', () => {
   draft.flags.planEnabled = $('flag-plan').checked;
+  draftTouched = true;
   updateDirty();
 });
 $('flag-advisor').addEventListener('change', () => {
   draft.flags.advisorEnabled = $('flag-advisor').checked;
+  draftTouched = true;
   updateDirty();
 });
 $('flag-prewalk').addEventListener('change', () => {
   draft.flags.taskPrewalk = $('flag-prewalk').checked;
+  draftTouched = true;
   updateDirty();
 });
 $('default-thinking').addEventListener('change', () => {
   draft.defaultThinkingLevel = $('default-thinking').value;
+  draftTouched = true;
   updateDirty();
 });
 
@@ -605,58 +706,183 @@ function updateDirty() {
 
 // ── Connectors ──────────────────────────────────────────────────────────────
 
-function renderConnectors() {
-  const connectors = app.connectors;
+function statusPill(target) {
+  if (target.error) return '<span class="pill err">配置错误</span>';
+  if (target.connected) return '<span class="pill ok">已注册</span>';
+  if (target.detected) return '<span class="pill warn">未注册</span>';
+  return '<span class="pill">未检测</span>';
+}
+
+function capabilityLabel(target) {
+  const caps = target.capabilities || [];
+  return caps.length ? caps.join(' · ') : '仅 MCP 注册';
+}
+
+function renderAgents() {
+  const connectors = catalog.connectors;
   if (!connectors) return;
   $('conn-server').textContent = `服务名 · ${connectors.serverName}`;
-
-  const list = $('targets-list');
+  const list = $('agents-list');
   list.innerHTML = connectors.targets
-    .map((target) => {
-      const status = target.error
-        ? '<span class="pill err">配置错误</span>'
-        : target.connected
-          ? '<span class="pill ok">已连接</span>'
-          : target.detected
-            ? '<span class="pill warn">未连接</span>'
-            : '<span class="pill">未检测</span>';
-      const disabled = !target.detected && !target.custom ? 'disabled' : '';
-      return `
-        <div class="target${target.id === 'omp' ? ' primary' : ''}">
+    .map(
+      (target) => `
+        <div class="target agent-row">
           <div class="target-top">
             <div>
               <div class="target-name">${esc(target.label)}</div>
               <div class="target-kind">${esc(target.kind)}</div>
+              <div class="agent-caps">${esc(capabilityLabel(target))}</div>
             </div>
-            ${status}
           </div>
-          <div class="target-path">${esc(target.configPath)}</div>
-          ${target.error ? `<div class="muted">${esc(target.error)}</div>` : ''}
           <div class="target-actions">
-            ${target.custom ? `<button class="btn small ghost" data-remove="${esc(target.id)}">移除记录</button>` : ''}
-            <button class="btn small ${target.connected ? 'danger' : 'primary'}"
-              data-toggle="${esc(target.id)}" data-enable="${target.connected ? '0' : '1'}" ${disabled}>
-              ${target.connected ? '断开' : '连接'}
-            </button>
+            ${statusPill(target)}
+            <button class="btn small" data-agent-view="${esc(target.id)}">查看配置</button>
           </div>
-        </div>`;
-    })
+        </div>`
+    )
     .join('');
+}
 
-  list.querySelectorAll('[data-toggle]').forEach((button) => {
-    button.addEventListener('click', () =>
-      toggleTarget(button.dataset.toggle, button.dataset.enable === '1')
-    );
-  });
-  list.querySelectorAll('[data-remove]').forEach((button) => {
-    button.addEventListener('click', () => removeCustom(button.dataset.remove));
-  });
+function renderMcp(slotId, targetId) {
+  const slot = $(slotId);
+  if (!slot) return;
+  const target = catalog.connectors?.targets?.find((item) => item.id === targetId);
+  if (!target) {
+    slot.innerHTML = '<div class="card"><div class="muted">未找到该目标，返回列表重新选择。</div></div>';
+    return;
+  }
+  const disabled = !target.detected && !target.custom ? 'disabled' : '';
+  slot.innerHTML = `
+    <div class="card mcp-card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">MCP 注册</div>
+          <div class="muted">写入前自动备份原配置，只合并 <code>mcpServers</code> 条目；已注册不代表当前会话已加载。</div>
+        </div>
+        ${statusPill(target)}
+      </div>
+      <div class="kv">
+        ${kvRow('配置文件', target.configPath || '')}
+        ${kvRow('配置格式', target.format || '')}
+        ${target.error ? kvRow('错误', target.error, 'err') : ''}
+      </div>
+      <div class="row-end">
+        ${target.custom ? `<button class="btn ghost small" data-remove="${esc(target.id)}">移除记录</button>` : ''}
+        <button class="btn small ${target.connected ? 'danger' : 'primary'}"
+          data-toggle="${esc(target.id)}" data-enable="${target.connected ? '0' : '1'}" ${disabled}>
+          ${target.connected ? '取消注册 MCP' : '注册 MCP'}
+        </button>
+      </div>
+    </div>`;
+}
 
-  renderSnippet();
+function renderActiveMcp() {
+  if (!currentAgent) return;
+  renderMcp(DETAIL_SLOTS[currentAgent] || 'agent-mcp', currentAgent);
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (!bytes) return '0 MB';
+  const gb = bytes / 1024 ** 3;
+  if (gb >= 1) return `${gb.toFixed(2)} GB`;
+  return `${Math.round(bytes / 1024 ** 2)} MB`;
+}
+
+function memoryTarget(agentId) {
+  return catalog.connectors?.targets?.find((target) => target.id === agentId) || null;
+}
+
+function agentSamples(agentId) {
+  return (memoryState.samples || []).filter((sample) => sample.agent === agentId);
+}
+
+function renderMemory(slotId, agentId) {
+  const slot = $(slotId);
+  if (!slot) return;
+  const target = memoryTarget(agentId);
+  const samples = agentSamples(agentId);
+  const warned = samples.some((sample) => sample.alerted);
+  const threshold = memoryState.thresholdBytes
+    ? formatBytes(memoryState.thresholdBytes)
+    : '1.75 GB';
+  const blocks = samples
+    .map(
+      (sample) => `
+        <div class="memory-sample">
+          <div class="memory-sample-title">${esc(sample.sessionId || '未命名')} · ${esc(sample.phase || '阶段未上报')}</div>
+          <div class="kv">
+            ${kvRow('工作区', sample.cwd || '—')}
+            ${kvRow('内存', formatBytes(sample.rssBytes), sample.alerted ? 'err' : '')}
+            ${kvRow(
+              '采样',
+              `${new Date(sample.sampledAt).toLocaleTimeString('zh-CN', { hour12: false })} · ${sample.scope === 'process' ? '进程级' : '本次运行'}`
+            )}
+            ${sample.note ? kvRow('说明', sample.note) : ''}
+          </div>
+        </div>`
+    )
+    .join('');
+  const empty = target?.capabilities?.length
+    ? '未观测到该 Agent 的会话。OMP 由扩展上报；OpenCode / Codex 只在 Fusion 启动的运行期间显示。'
+    : '该客户端未提供会话归属，只能管理 MCP 注册。';
+  slot.innerHTML = `
+    <div class="card memory-card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">会话资源</div>
+          <div class="muted">本机进程常驻内存（RSS / Windows Working Set）· 预警 ${threshold} · 每 5 秒刷新</div>
+        </div>
+        ${samples.length ? `<span class="pill ${warned ? 'err' : 'ok'}">${warned ? '超过预警' : '正常'}</span>` : '<span class="pill">未观测</span>'}
+      </div>
+      ${samples.length ? `<div class="memory-samples">${blocks}</div>` : `<div class="muted">${empty}</div>`}
+      ${warned ? '<div class="memory-alert">已超过预警线：先整理进度再开新对话（/new，旧会话保留）；新对话不保证释放进程内存，也不会上报服务器端模型的上下文用量。</div>' : ''}
+      ${samples.length ? '<div class="row-end"><button class="btn small" data-handoff="' + esc(agentId) + '">复制交接提纲</button></div>' : ''}
+    </div>`;
+}
+
+async function loadMemory() {
+  try {
+    memoryState = await api('/api/session-memory');
+  } catch {
+    return;
+  }
+  if (!currentAgent) return;
+  const slot = MEMORY_SLOTS[currentAgent] || 'agent-memory';
+  renderMemory(slot, currentAgent);
+}
+
+async function copyHandoff(agentId) {
+  const target = memoryTarget(agentId);
+  const sample = agentSamples(agentId)[0];
+  if (!sample) return;
+  const text = [
+    'Orzic Fusion 交接提纲',
+    `Agent：${target?.label || agentId}`,
+    `会话：${sample.sessionId || '未命名'}`,
+    `工作区：${sample.cwd || '（未上报）'}`,
+    `阶段：${sample.phase || '（未上报）'}`,
+    `内存：${formatBytes(sample.rssBytes)}（进程常驻）· ${new Date(sample.sampledAt).toLocaleString('zh-CN')}`,
+    '',
+    '目标：',
+    '已完成：',
+    '未完成：',
+    '关键决策：',
+    '关键文件：',
+    '下一步：',
+    '',
+    '说明：由 Fusion 生成；粘贴到新对话后补全空白。旧会话保留，不会被自动删除。',
+  ].join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast('交接提纲已复制');
+  } catch {
+    showToast('复制失败，请手动选择文本', true);
+  }
 }
 
 function renderSnippet() {
-  const snippets = app.connectors?.snippets || {};
+  const snippets = catalog.connectors?.snippets || {};
   $('snippet-code').textContent = snippets[activeSnip] || '';
   document.querySelectorAll('#snippet-tabs .chip').forEach((chip) => {
     chip.classList.toggle('active', chip.dataset.snip === activeSnip);
@@ -670,12 +896,31 @@ $('snippet-tabs').addEventListener('click', (event) => {
   renderSnippet();
 });
 
+function applyCatalog(data) {
+  catalog = data;
+  const fusion = catalog.fusion || {};
+  const pill = $('pill-fusion');
+  pill.textContent = `Fusion · ${fusion.version || '未检测到'}`;
+  pill.className = `pill ${fusion.version ? 'ok' : 'err'}`;
+  $('conn-server').textContent = `服务名 · ${catalog.connectors?.serverName || 'fusion'}`;
+  renderAgents();
+  renderActiveMcp();
+  renderSnippet();
+  renderOverview();
+}
+
+async function loadCatalog() {
+  try {
+    applyCatalog(await api('/api/agents'));
+  } catch (error) {
+    showToast(`Agent 目录加载失败：${error.message}`, true);
+  }
+}
+
 async function toggleTarget(id, enable) {
   try {
-    const state = await api('/api/connectors/toggle', { id, enable });
-    app.connectors = state.connectors;
-    renderConnectors();
-    showToast(enable ? '已注册 fusion MCP' : '已断开 fusion MCP');
+    applyCatalog(await api('/api/connectors/toggle', { id, enable }));
+    showToast(enable ? '已注册 fusion MCP' : '已取消注册 fusion MCP');
   } catch (error) {
     showToast(error.message, true);
   }
@@ -683,10 +928,9 @@ async function toggleTarget(id, enable) {
 
 async function removeCustom(id) {
   try {
-    const state = await api('/api/connectors/remove-custom', { id });
-    app.connectors = state.connectors;
-    renderConnectors();
+    applyCatalog(await api('/api/connectors/remove-custom', { id }));
     showToast('已移除记录（未改动原配置文件）');
+    if (currentAgent === id) showAgentsList();
   } catch (error) {
     showToast(error.message, true);
   }
@@ -700,9 +944,7 @@ $('btn-connect-custom').addEventListener('click', async () => {
     return;
   }
   try {
-    const state = await api('/api/connectors/custom', { customPath: path, label, enable: true });
-    app.connectors = state.connectors;
-    renderConnectors();
+    applyCatalog(await api('/api/connectors/custom', { customPath: path, label, enable: true }));
     $('custom-path').value = '';
     $('custom-label').value = '';
     showToast('已接入自定义配置');
@@ -754,23 +996,13 @@ function renderOcEnv() {
   const status = oc.status;
   if (!status) return;
   const connector = status.connector || {};
-  const connected = !!connector.connected;
-  const configState = status.jsoncExists
-    ? '存在 JSONC，只读'
-    : status.configExists
-      ? connected
-        ? '已注册'
-        : '未注册'
-      : '配置未找到';
   $('oc-version').textContent = `OpenCode · ${(status.version || '未检测到').replace(/^opencode\s+/i, '')}`;
   $('oc-version').className = `pill ${status.version ? 'ok' : 'err'}`;
-  $('oc-conn-status').textContent = connected ? 'MCP 已注册' : 'MCP 未注册';
-  $('oc-conn-status').className = `pill ${connected ? 'ok' : connector.error ? 'err' : 'warn'}`;
   $('oc-env').innerHTML = [
     kvRow('可执行文件', status.executable || '未检测到', status.executable ? 'ok' : 'err'),
     kvRow('版本', status.version || '未检测到', status.version ? 'ok' : 'err'),
     kvRow('配置文件', status.configPath || ''),
-    kvRow('MCP 状态', configState, connected ? 'ok' : 'err'),
+    ...(status.jsoncExists ? [kvRow('配置提示', '存在 JSONC，只读', 'warn')] : []),
     kvRow('验收 agent', status.reviewAgentReady ? '就绪' : '首次验收时创建'),
     kvRow('模型目录', `${(oc.models || []).length} 个`),
   ].join('');
@@ -1216,22 +1448,13 @@ function renderCxEnv() {
   const status = cx.status;
   if (!status) return;
   const connector = status.connector || {};
-  const connected = !!connector.connected;
-  const configState = status.configExists
-    ? connected
-      ? '已注册'
-      : '未注册'
-    : '配置未找到';
   $('cx-version').textContent = `Codex · ${status.version || '未检测到'}`;
   $('cx-version').className = `pill ${status.version ? 'ok' : 'err'}`;
-  $('cx-conn-status').textContent = connected ? 'MCP 已注册' : 'MCP 未注册';
-  $('cx-conn-status').className = `pill ${connected ? 'ok' : connector.error ? 'err' : 'warn'}`;
   $('cx-env').innerHTML = [
     kvRow('可执行文件', status.executable || '未检测到', status.executable ? 'ok' : 'err'),
     kvRow('版本', status.version || '未检测到', status.version ? 'ok' : 'err'),
     kvRow('登录', status.login || '未知'),
     kvRow('配置文件', status.configPath || ''),
-    kvRow('MCP 状态', configState, connected ? 'ok' : 'err'),
     kvRow('验收隔离', status.isolation || ''),
     kvRow('模型目录', `${(cx.models || []).length} 个`),
   ].join('');
@@ -1642,28 +1865,30 @@ function kvRow(key, value, cls = '') {
 }
 
 function renderOverview() {
-  const omp = app.omp;
-  $('overview-env').innerHTML = [
-    kvRow('OMP 可执行文件', omp.executable || '未检测到', omp.executable ? 'ok' : 'err'),
-    kvRow('OMP 版本', omp.version || '未检测到', omp.version ? 'ok' : 'err'),
-    kvRow('Agent 目录', omp.agentDir || ''),
-    kvRow('配置文件', omp.configPath || ''),
-    kvRow('模型目录', `${app.models.length} 个`),
-    kvRow('MCP 服务名', app.connectors?.serverName || 'fusion'),
-    kvRow('本程序', app.connectors?.executable || ''),
+  const fusion = catalog.fusion || {};
+  const connectors = catalog.connectors || {};
+  const targets = connectors.targets || [];
+  const registered = targets.filter((target) => target.connected);
+
+  $('overview-fusion').innerHTML = [
+    kvRow('Fusion 版本', fusion.version || '未检测到', fusion.version ? 'ok' : 'err'),
+    kvRow('本程序', fusion.executable || ''),
+    kvRow('MCP 服务名', connectors.serverName || 'fusion'),
+    kvRow('Agent 目标', `${targets.length} 个`),
+    kvRow('已注册', `${registered.length} 个`),
   ].join('');
 
-  $('overview-roles').innerHTML = omp.roles
-    .map((role) =>
+  $('overview-agents').innerHTML = targets
+    .map((target) =>
       kvRow(
-        role.label,
-        role.raw || '未设置',
-        role.raw ? '' : 'err'
+        target.label,
+        `${capabilityLabel(target)}${target.connected ? ' · 已注册' : ''}`,
+        target.connected ? 'ok' : ''
       )
     )
     .join('');
 
-  const snippet = app.connectors?.snippets?.mcpServers || '';
+  const snippet = connectors.snippets?.mcpServers || '';
   $('overview-usage').textContent = [
     '1) 直接启动控制台：',
     '   orzic-fusion.exe',
@@ -1681,14 +1906,30 @@ function renderOverview() {
 
 // ── State application ───────────────────────────────────────────────────────
 
-function applyState(state) {
-  app = state;
-  if (!reviewCwd && state.acceptance?.cwd) reviewCwd = state.acceptance.cwd;
-  const omp = state.omp;
+function buildDraft(omp) {
+  return {
+    roles: Object.fromEntries(
+      (omp.roles || []).map((role) => [
+        role.role,
+        { model: role.model || '', thinking: role.thinking || '' },
+      ])
+    ),
+    flags: { ...(omp.flags || {}) },
+    defaultThinkingLevel: omp.defaultThinkingLevel || 'high',
+  };
+}
 
-  const versionPill = $('pill-version');
-  versionPill.textContent = `OMP · ${omp.version || '未检测到'}`;
+function renderOmpEnv(omp) {
+  const pendingVersion = !!omp.versionPending && !omp.version;
+  const versionPill = $('omp-version');
+  versionPill.textContent = `OMP · ${omp.version || (pendingVersion ? '读取中…' : '未检测到')}`;
   versionPill.className = `pill ${omp.version ? 'ok' : 'err'}`;
+  $('omp-env').innerHTML = [
+    kvRow('可执行文件', omp.executable || '未检测到', omp.executable ? 'ok' : 'err'),
+    kvRow('版本', omp.version || (pendingVersion ? '读取中…' : '未检测到'), omp.version ? 'ok' : pendingVersion ? '' : 'err'),
+    kvRow('Agent 目录', omp.agentDir || ''),
+    kvRow('配置文件', omp.configPath || ''),
+  ].join('');
   updateModelsCount();
 
   const errorCard = $('omp-error');
@@ -1698,39 +1939,86 @@ function applyState(state) {
   } else {
     errorCard.classList.add('hidden');
   }
-
-  draft = {
-    roles: Object.fromEntries(
-      omp.roles.map((role) => [
-        role.role,
-        { model: role.model || '', thinking: role.thinking || '' },
-      ])
-    ),
-    flags: { ...omp.flags },
-    defaultThinkingLevel: omp.defaultThinkingLevel || 'high',
-  };
-  baseline = JSON.stringify(draft);
-
-  renderFlags();
-  renderRoles();
-  renderConnectors();
-  renderOverview();
-  updateDirty();
 }
 
-async function loadState() {
+function applyExtras(state) {
+  if (state.acceptance) {
+    app.acceptance = { ...(app.acceptance || {}), ...state.acceptance };
+    if (!reviewCwd && state.acceptance.cwd) reviewCwd = state.acceptance.cwd;
+    syncReviewAuto();
+    renderReviewResult();
+  }
+  if (state.connectors) {
+    catalog.connectors = state.connectors;
+    renderAgents();
+    renderActiveMcp();
+    renderSnippet();
+    renderOverview();
+  }
+}
+
+function applyState(state, { merge = false } = {}) {
+  if (!state || !state.omp) return;
+  if (!merge) {
+    app.omp = state.omp;
+    if (Array.isArray(state.models)) app.models = state.models;
+    renderOmpEnv(state.omp);
+    draft = buildDraft(state.omp);
+    baseline = JSON.stringify(draft);
+    draftTouched = false;
+    renderFlags();
+    renderRoles();
+    updateDirty();
+  } else {
+    app.omp = { ...(app.omp || {}), ...state.omp };
+    if (Array.isArray(state.models)) app.models = state.models;
+    renderOmpEnv(app.omp);
+    const dirty = draft && JSON.stringify(draft) !== baseline;
+    if (!dirty) {
+      draft = buildDraft(app.omp);
+      baseline = JSON.stringify(draft);
+      draftTouched = false;
+      renderFlags();
+      renderRoles();
+    }
+    updateDirty();
+  }
+  applyExtras(state);
+}
+
+// Fast paint from cached config, then the full status (model directory and
+// version) in the background. Both share one in-flight fast request.
+function fetchOmpFast(force = false) {
+  if (!force && ompPrefetch) return ompPrefetch;
+  const request = api(`/api/omp/status?fast=1${force ? '&force=1' : ''}`).finally(() => {
+    if (ompPrefetch === request) ompPrefetch = null;
+  });
+  if (!force) ompPrefetch = request;
+  return request;
+}
+
+async function loadState(force = false) {
+  lastSavedAt = '';
   try {
-    lastSavedAt = '';
-    applyState(await api('/api/state'));
+    applyState(await fetchOmpFast(force));
   } catch (error) {
+    ompPrefetch = null;
     showToast(`加载失败：${error.message}`, true);
+  }
+  try {
+    applyState(await api(`/api/omp/status${force ? '?force=1' : ''}`), { merge: true });
+  } catch (error) {
+    showToast(`完整状态读取失败：${error.message}`, true);
   }
 }
 
 // ── Actions ─────────────────────────────────────────────────────────────────
 
 $('btn-refresh').addEventListener('click', async () => {
-  await loadState();
+  await loadCatalog();
+  if (currentAgent === 'omp') await loadState(true);
+  if (currentAgent === 'opencode') await loadOpenCode(true);
+  if (currentAgent === 'codex') await loadCodex(true);
   showToast('状态已刷新');
 });
 
@@ -1755,6 +2043,7 @@ $('btn-reset').addEventListener('click', () => {
   if (!baseline) return;
   lastSavedAt = '';
   draft = JSON.parse(baseline);
+  draftTouched = false;
   renderFlags();
   renderRoles();
   updateDirty();
@@ -1798,4 +2087,14 @@ setInterval(() => {
   api('/api/heartbeat', {}).catch(() => {});
 }, 5000);
 
-loadState();
+setInterval(() => {
+  if (currentAgent) loadMemory();
+}, 5000);
+
+loadCatalog();
+
+// Warm the cached config while the directory is on screen so the first OMP
+// open does not wait for `omp config list`.
+setTimeout(() => {
+  if (!app.omp) fetchOmpFast().catch(() => {});
+}, 250);

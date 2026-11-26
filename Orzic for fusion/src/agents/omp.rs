@@ -51,8 +51,14 @@ pub fn find_executable() -> String {
     } else {
         &["omp"]
     };
+    // The `/gogo` launcher sits first on PATH; internal calls want the real
+    // omp, without paying for a wrapper process on every config read.
+    let shim = crate::route::omp_shim_dir();
     if let Some(paths) = env::var_os("PATH") {
         for dir in env::split_paths(&paths) {
+            if shim.as_ref().is_some_and(|shim| shim == &dir) {
+                continue;
+            }
             for name in names {
                 let candidate = dir.join(name);
                 if candidate.is_file() {
@@ -121,16 +127,159 @@ fn run_json(args: &[&str]) -> Result<Value, String> {
         .map_err(|e| format!("OMP {} 输出无法解析 JSON: {e}", args.join(" ")))
 }
 
+static VERSION_CACHE: Mutex<Option<(u64, String)>> = Mutex::new(None);
+const VERSION_TTL_MS: u64 = 60_000;
+
+/// `omp --version` spawns a process; it only changes on upgrade.
 fn version() -> Option<String> {
-    run_plain(&["--version"])
+    if let Ok(guard) = VERSION_CACHE.lock() {
+        if let Some((at, value)) = guard.as_ref() {
+            if now_ms().saturating_sub(*at) < VERSION_TTL_MS {
+                return Some(value.clone());
+            }
+        }
+    }
+    let value = run_plain(&["--version"])
         .ok()
         .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+        .filter(|v| !v.is_empty())?;
+    if let Ok(mut guard) = VERSION_CACHE.lock() {
+        *guard = Some((now_ms(), value.clone()));
+    }
+    Some(value)
 }
 
 pub(crate) fn config_snapshot() -> Result<Map<String, Value>, String> {
     let raw = run_json(&["config", "list"])?;
     Ok(raw.as_object().cloned().unwrap_or_default())
+}
+
+/// `omp config list` costs ~1.6s per call. The console reads status far more
+/// often than the config changes, so keep a short-lived in-memory snapshot plus
+/// a disk snapshot keyed by `config.yml`'s mtime. A process restart then paints
+/// from the last known-good config as long as the file is untouched.
+static CONFIG_CACHE: Mutex<Option<(u64, u64, Map<String, Value>)>> = Mutex::new(None);
+const CONFIG_CACHE_TTL_MS: u64 = 15_000;
+const CONFIG_DISK_TTL_MS: u64 = 10 * 60 * 1000;
+const CONFIG_DISK_VERSION: u64 = 1;
+
+/// Remember a config alongside the `config.yml` mtime it was read or written
+/// at, so an external edit invalidates it immediately instead of waiting out
+/// the TTL.
+fn remember_config(cfg: &Map<String, Value>) {
+    let mtime = config_mtime_ms().unwrap_or(0);
+    if let Ok(mut guard) = CONFIG_CACHE.lock() {
+        *guard = Some((now_ms(), mtime, cfg.clone()));
+    }
+}
+
+fn config_snapshot_file() -> PathBuf {
+    omp_agent_dir().join("orzic-fusion-config-snapshot.json")
+}
+
+fn config_mtime_ms() -> Option<u64> {
+    std::fs::metadata(config_path())
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_millis() as u64)
+}
+
+fn write_config_snapshot(cfg: &Map<String, Value>) {
+    let Some(mtime) = config_mtime_ms() else {
+        return;
+    };
+    let text = json!({
+        "v": CONFIG_DISK_VERSION,
+        "mtime": mtime,
+        "at": now_ms(),
+        "config": cfg,
+    })
+    .to_string();
+    let _ = config::write_text_atomic(&config_snapshot_file(), &text, None);
+}
+
+fn read_config_snapshot() -> Option<Map<String, Value>> {
+    let cached = config::read_json(&config_snapshot_file()).ok()?;
+    if cached.get("v").and_then(Value::as_u64) != Some(CONFIG_DISK_VERSION) {
+        return None;
+    }
+    let fresh = cached
+        .get("at")
+        .and_then(Value::as_u64)
+        .map(|at| now_ms().saturating_sub(at) < CONFIG_DISK_TTL_MS)
+        .unwrap_or(false);
+    if !fresh || cached.get("mtime").and_then(Value::as_u64) != config_mtime_ms() {
+        return None;
+    }
+    cached.get("config")?.as_object().cloned()
+}
+
+pub(crate) fn config_snapshot_cached(force: bool) -> Result<Map<String, Value>, String> {
+    if !force {
+        let mtime = config_mtime_ms();
+        if let Ok(guard) = CONFIG_CACHE.lock() {
+            if let Some((at, cached_mtime, cfg)) = guard.as_ref() {
+                if now_ms().saturating_sub(*at) < CONFIG_CACHE_TTL_MS
+                    && Some(*cached_mtime) == mtime
+                {
+                    return Ok(cfg.clone());
+                }
+            }
+        }
+        if let Some(cfg) = read_config_snapshot() {
+            remember_config(&cfg);
+            return Ok(cfg);
+        }
+    }
+    let cfg = config_snapshot()?;
+    remember_config(&cfg);
+    write_config_snapshot(&cfg);
+    Ok(cfg)
+}
+
+/// Same disk snapshot as `config_snapshot_cached`, but without the in-memory
+/// TTL: a write path must not merge into a copy that an external edit has
+/// already outdated. The snapshot is still keyed by `config.yml`'s mtime, so a
+/// stale file falls through to a real `omp config list`.
+pub(crate) fn config_snapshot_verified() -> Result<Map<String, Value>, String> {
+    if let Some(cfg) = read_config_snapshot() {
+        remember_config(&cfg);
+        return Ok(cfg);
+    }
+    let cfg = config_snapshot()?;
+    remember_config(&cfg);
+    write_config_snapshot(&cfg);
+    Ok(cfg)
+}
+
+fn set_entry(cfg: &mut Map<String, Value>, key: &str, value: Value) {
+    match cfg.get_mut(key).and_then(Value::as_object_mut) {
+        Some(entry) => {
+            entry.insert("value".to_string(), value);
+        }
+        None => {
+            cfg.insert(key.to_string(), json!({ "value": value }));
+        }
+    }
+}
+
+/// Any cached model directory, regardless of TTL. Fast status uses it so the
+/// form can render real role labels while a stale cache refreshes in the
+/// background.
+fn cached_models_any() -> Option<Vec<ModelInfo>> {
+    let cached = config::read_json(&models_cache_file()).ok()?;
+    if cached.get("v").and_then(Value::as_u64) != Some(MODELS_CACHE_VERSION) {
+        return None;
+    }
+    let models = parse_cached_models(cached.get("models"));
+    if models.is_empty() {
+        None
+    } else {
+        Some(models)
+    }
 }
 
 pub(crate) fn entry_value<'a>(cfg: &'a Map<String, Value>, key: &str) -> Option<&'a Value> {
@@ -289,37 +438,67 @@ pub fn config_path() -> PathBuf {
     omp_agent_dir().join("config.yml")
 }
 
-pub fn read_status() -> Value {
-    let mut error: Option<String> = None;
-    let cfg = match config_snapshot() {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            error = Some(e);
-            Map::new()
-        }
-    };
-    let models = list_models(false).unwrap_or_default();
+fn status_payload(
+    cfg: &Map<String, Value>,
+    models: Vec<ModelInfo>,
+    version: Option<String>,
+    models_pending: bool,
+    error: Option<String>,
+) -> Value {
     let known = known_selectors(&models);
-    let roles = roles::parse_roles(entry_value(&cfg, "modelRoles"), &known);
+    let roles = roles::parse_roles(entry_value(cfg, "modelRoles"), &known);
 
     json!({
         "executable": find_executable(),
-        "version": version(),
+        "version": version,
+        "versionPending": version.is_none(),
+        "modelsPending": models_pending,
         "agentDir": omp_agent_dir().to_string_lossy(),
         "configPath": config_path().to_string_lossy(),
         "modelsCount": models.len(),
         "error": error,
         "roles": roles,
         "thinkingLevels": roles::THINKING_LEVELS,
-        "defaultThinkingLevel": entry_value(&cfg, "defaultThinkingLevel")
+        "defaultThinkingLevel": entry_value(cfg, "defaultThinkingLevel")
             .cloned()
             .unwrap_or(Value::String("high".into())),
         "flags": {
-            "planEnabled": entry_value(&cfg, "plan.enabled").and_then(Value::as_bool).unwrap_or(false),
-            "advisorEnabled": entry_value(&cfg, "advisor.enabled").and_then(Value::as_bool).unwrap_or(false),
-            "taskPrewalk": entry_value(&cfg, "task.prewalk").and_then(Value::as_bool).unwrap_or(false),
+            "planEnabled": entry_value(cfg, "plan.enabled").and_then(Value::as_bool).unwrap_or(false),
+            "advisorEnabled": entry_value(cfg, "advisor.enabled").and_then(Value::as_bool).unwrap_or(false),
+            "taskPrewalk": entry_value(cfg, "task.prewalk").and_then(Value::as_bool).unwrap_or(false),
         },
     })
+}
+
+fn status_from_cfg(cfg: Result<Map<String, Value>, String>) -> (Map<String, Value>, Option<String>) {
+    match cfg {
+        Ok(cfg) => (cfg, None),
+        Err(e) => (Map::new(), Some(e)),
+    }
+}
+
+/// Status for the console. `fast` uses only the short-lived config snapshot
+/// and whatever model cache exists, starting no subprocess, so the form can
+/// paint at once. The full call refreshes the model directory and version.
+pub fn console_status(fast: bool, force: bool) -> Value {
+    let (cfg, error) = status_from_cfg(config_snapshot_cached(force));
+    let (models, pending) = if fast {
+        match cached_models_any() {
+            Some(models) => (models, false),
+            None => (Vec::new(), true),
+        }
+    } else {
+        (list_models(false).unwrap_or_default(), false)
+    };
+    let version = if fast { None } else { version() };
+    let omp = status_payload(&cfg, models.clone(), version, pending, error);
+    json!({ "omp": omp, "models": models })
+}
+
+pub fn read_status() -> Value {
+    let (cfg, error) = status_from_cfg(config_snapshot_cached(false));
+    let models = list_models(false).unwrap_or_default();
+    status_payload(&cfg, models, version(), false, error)
 }
 
 /// Applies a console/MCP patch. Shape:
@@ -330,7 +509,8 @@ pub fn save(patch: &Map<String, Value>) -> Result<Value, String> {
     let _guard = WRITE_LOCK
         .lock()
         .map_err(|_| "OMP 写入锁不可用".to_string())?;
-    let cfg = config_snapshot()?;
+    let mut cfg = config_snapshot_verified()?;
+    let mut changed = false;
 
     if let Some(Value::Object(edits)) = patch.get("roles") {
         let current = entry_value(&cfg, "modelRoles")
@@ -354,8 +534,10 @@ pub fn save(patch: &Map<String, Value>) -> Result<Value, String> {
         let merged = roles::merge_roles(&current, &list)?;
         if merged != current {
             let encoded =
-                serde_json::to_string(&Value::Object(merged)).map_err(|e| e.to_string())?;
+                serde_json::to_string(&Value::Object(merged.clone())).map_err(|e| e.to_string())?;
             run_plain(&["config", "set", "modelRoles", &encoded])?;
+            set_entry(&mut cfg, "modelRoles", Value::Object(merged));
+            changed = true;
         }
     }
 
@@ -373,6 +555,8 @@ pub fn save(patch: &Map<String, Value>) -> Result<Value, String> {
                         key,
                         if value { "true" } else { "false" },
                     ])?;
+                    set_entry(&mut cfg, key, json!(value));
+                    changed = true;
                 }
             }
         }
@@ -388,9 +572,15 @@ pub fn save(patch: &Map<String, Value>) -> Result<Value, String> {
         }
         if entry_value(&cfg, "defaultThinkingLevel").and_then(Value::as_str) != Some(level) {
             run_plain(&["config", "set", "defaultThinkingLevel", level])?;
+            set_entry(&mut cfg, "defaultThinkingLevel", json!(level));
+            changed = true;
         }
     }
 
+    if changed {
+        write_config_snapshot(&cfg);
+        remember_config(&cfg);
+    }
     Ok(read_status())
 }
 

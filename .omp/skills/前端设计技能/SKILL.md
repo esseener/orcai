@@ -1,9 +1,9 @@
 ---
-name: fusion-ui-design
-description: Use when changing or reviewing the Orzic for Fusion local console UI in Orzic for fusion/src/ui; covers poster-style layout, pure-black top bar, offline assets, responsive states, and browser verification.
+name: 前端设计技能
+description: 前端设计技能。Use when changing or reviewing the Orzic for Fusion local console UI in Orzic for fusion/src/ui; covers poster-style layout, pure-black top bar, offline assets, responsive states, and browser verification.
 ---
 
-# Fusion UI design
+# 前端设计技能（Fusion UI）
 
 Use this for the Fusion console only. It is a working night desk, not a marketing site. Preserve the model pickers, save flow, MCP registration, session gates, and PASS/REWORK states.
 
@@ -12,9 +12,9 @@ Use this for the Fusion console only. It is a working night desk, not a marketin
 - The top bar is full-bleed `#000000`, edge to edge. Set `<meta name="theme-color" content="#000000">` for the app window frame and use a zero-width `<title>` so the title bar has no text.
 - Put the extracted white mark at the page top-left (50px) beside a 40px/700 `Orzic` wordmark, bottom-aligned, with a restrained shadow; do not shrink the wordmark on narrow screens. Keep the version pill and actions right-aligned, wrapping only when space runs out.
 - Keep the favicon fully transparent (cache-busted `/favicon-v2.png`) so the native title bar has no icon. After the Edge app window appears, set `WM_SETICON` `ICON_BIG` from the EXE icon resource and `ICON_SMALL` to 0; this gives the taskbar the new mark while the title bar stays blank. Do not use a separate `--user-data-dir`, because that triggers Edge account sync prompts. Verify the real window frame and taskbar, not only a page screenshot.
-- Build hierarchy with type and rules: one large page title, one short description, one clear primary action. The roles page is the exception: use the short heading `模型` at 24px (20–22px narrow), with the three-step poster strips carrying the visual weight. Do not put every section in the same rounded card.
+- Build hierarchy with type and rules: one large page title, one short description, one clear primary action. The OMP detail is the exception: its heading names the Agent, and the three-step poster strips carry the visual weight. Do not put every section in the same rounded card.
 - The role page may use a poster composition: a compact heading beside three staggered strips labelled `01` plan, `02` execute, `03` review. The strips are decorative and must be `aria-hidden`; never make them look like clickable controls.
-- Use the page number and kicker as orientation, not as an extra card. Keep `01`–`05` in reading order.
+- Use the page number and kicker as orientation, not as an extra card. Only the two top-level pages carry numbers (`01` agents, `02` overview); an Agent detail is a sub-view with a back link and its name as the title, never a numbered page.
 - The reference screenshots are direction, not assets. Do not copy torn paper, stars, illustrations, screenshots, or their copy.
 - One accent (cobalt), one paper text colour, one graphite surface ramp. Green, amber, and red are status only and always carry a text label.
 
@@ -29,10 +29,11 @@ Use this for the Fusion console only. It is a working night desk, not a marketin
 
 ## Page patterns
 
-- Roles: large title, three-step poster strips, a quiet routing settings strip, then plan/execute/review groups with role rows. Save bar stays visible but does not cover controls.
-- Connections: a directory list. Each target row shows name, kind, status, path, and action without becoming a nested card. Custom JSON and snippets are separate sections.
-- OpenCode/Codex: role row grid, a task sheet, then real plan/execute/review output. Environment details are secondary.
-- Overview: two-column information board, then a separate cross-agent usage block.
+- Agents: the home page is a directory. Each row shows name, kind, managed capabilities, registration status, and one `查看配置` action, without a config path and without writing config inline. Custom JSON and snippets stay as separate sections below.
+- Agent detail: a back link, the Agent name as the title, then a compact MCP card (status, path, format, register/unregister, remove custom record), followed by only the capabilities that Agent really has. A target without an adapter gets the MCP card plus a `仅支持 MCP 注册` note, never model or session forms.
+- OMP detail: three-step poster strips, a quiet routing settings strip, then plan/execute/review groups with role rows. Save bar stays visible but does not cover controls.
+- OpenCode/Codex detail: role row grid, a task sheet, then real plan/execute/review output. Environment details are secondary and must not repeat the MCP summary.
+- Overview: Fusion's own version/executable plus a per-Agent capability and registration summary, then a separate cross-agent usage block. Do not put one adapter's runtime snapshot here.
 
 ## Verification
 
